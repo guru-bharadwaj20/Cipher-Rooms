@@ -28,10 +28,16 @@ class ClientHandler:
         client_socket: ssl.SSLSocket,
         client_address: tuple,
         broadcast_callback: Callable,
+        room_broadcast_callback: Optional[Callable],
         remove_callback: Callable,
         login_callback: Optional[Callable] = None,
         disconnect_callback: Optional[Callable] = None,
-        persist_callback: Optional[Callable] = None
+        persist_callback: Optional[Callable] = None,
+        join_room_callback: Optional[Callable] = None,
+        leave_room_callback: Optional[Callable] = None,
+        list_rooms_callback: Optional[Callable] = None,
+        get_room_callback: Optional[Callable] = None,
+        default_room: str = 'lobby'
     ):
         """
         Initialize the client handler.
@@ -45,10 +51,16 @@ class ClientHandler:
         self.socket = client_socket
         self.address = client_address
         self.broadcast = broadcast_callback
+        self.broadcast_room = room_broadcast_callback
         self.remove_client = remove_callback
         self.on_login = login_callback
         self.on_disconnect = disconnect_callback
         self.persist_message = persist_callback
+        self.join_room = join_room_callback
+        self.leave_room = leave_room_callback
+        self.list_rooms = list_rooms_callback
+        self.get_room = get_room_callback
+        self.default_room = default_room
         self.username: Optional[str] = None
         self.running = True
         
@@ -95,7 +107,21 @@ class ClientHandler:
                     if isinstance(info, dict):
                         login_info.update(info)
 
+                # Default room policy: all users start in lobby on login.
+                room_result = None
+                if self.join_room:
+                    room_result = self.join_room(self, self.default_room)
+
                 self._send_login_context(login_info)
+
+                if room_result and room_result.get('ok'):
+                    self.send_message(
+                        MessageProtocol.create_message(
+                            MessageProtocol.TYPE_SYSTEM,
+                            'Server',
+                            f"You are now in room '{room_result.get('room')}'."
+                        )
+                    )
                 
                 # Broadcast join message to all clients
                 join_msg = MessageProtocol.create_message(
@@ -103,7 +129,14 @@ class ClientHandler:
                     self.username,
                     f"{self.username} joined the chat"
                 )
-                self.broadcast(join_msg, exclude=self)
+                current_room = self.default_room
+                if self.get_room:
+                    current_room = self.get_room(self)
+                join_msg['room'] = current_room
+                if self.broadcast_room:
+                    self.broadcast_room(current_room, join_msg, exclude=self)
+                else:
+                    self.broadcast(join_msg, exclude=self)
                 if self.persist_message:
                     self.persist_message(join_msg)
             
@@ -122,11 +155,99 @@ class ClientHandler:
                     msg_type = message.get("type")
                     
                     if msg_type == MessageProtocol.TYPE_CHAT:
-                        # Regular chat message - broadcast to all clients
-                        print(f"[{self.username}]: {message.get('content', '')}")
-                        self.broadcast(message, exclude=None)
+                        current_room = self.default_room
+                        if self.get_room:
+                            current_room = self.get_room(self)
+
+                        # Regular chat message - broadcast only to current room
+                        message['room'] = current_room
+                        print(f"[{current_room}] [{self.username}]: {message.get('content', '')}")
+                        if self.broadcast_room:
+                            self.broadcast_room(current_room, message, exclude=None)
+                        else:
+                            self.broadcast(message, exclude=None)
                         if self.persist_message:
                             self.persist_message(message)
+
+                    elif msg_type == MessageProtocol.TYPE_ROOM_JOIN:
+                        requested_room = message.get('content', '').strip()
+                        if not requested_room:
+                            self.send_message(
+                                MessageProtocol.create_message(
+                                    MessageProtocol.TYPE_ERROR,
+                                    'Server',
+                                    "Usage: /join <room_name>"
+                                )
+                            )
+                            continue
+
+                        result = {'ok': False, 'error': 'Room service unavailable.'}
+                        if self.join_room:
+                            result = self.join_room(self, requested_room)
+
+                        if result.get('ok'):
+                            room_name = result.get('room', requested_room)
+                            self.send_message(
+                                MessageProtocol.create_message(
+                                    MessageProtocol.TYPE_SYSTEM,
+                                    'Server',
+                                    f"Joined room '{room_name}'."
+                                )
+                            )
+                        else:
+                            self.send_message(
+                                MessageProtocol.create_message(
+                                    MessageProtocol.TYPE_ERROR,
+                                    'Server',
+                                    result.get('error', 'Could not join room.')
+                                )
+                            )
+
+                    elif msg_type == MessageProtocol.TYPE_ROOM_LEAVE:
+                        result = {'ok': False, 'error': 'Room service unavailable.'}
+                        if self.leave_room:
+                            result = self.leave_room(self)
+
+                        if result.get('ok'):
+                            room_name = result.get('room', self.default_room)
+                            left_room = result.get('left_room')
+                            if left_room:
+                                content = f"Left room '{left_room}'. Moved to '{room_name}'."
+                            else:
+                                content = f"You are in room '{room_name}'."
+
+                            self.send_message(
+                                MessageProtocol.create_message(
+                                    MessageProtocol.TYPE_SYSTEM,
+                                    'Server',
+                                    content
+                                )
+                            )
+                        else:
+                            self.send_message(
+                                MessageProtocol.create_message(
+                                    MessageProtocol.TYPE_ERROR,
+                                    'Server',
+                                    result.get('error', 'Could not leave room.')
+                                )
+                            )
+
+                    elif msg_type == MessageProtocol.TYPE_ROOM_LIST:
+                        rooms = []
+                        if self.list_rooms:
+                            rooms = self.list_rooms()
+                        if rooms:
+                            room_content = "Available rooms: " + ", ".join(rooms)
+                        else:
+                            room_content = "No rooms available."
+
+                        self.send_message(
+                            MessageProtocol.create_message(
+                                MessageProtocol.TYPE_SYSTEM,
+                                'Server',
+                                room_content
+                            )
+                        )
                     
                     elif msg_type == MessageProtocol.TYPE_LEAVE:
                         # Client wants to leave
@@ -204,12 +325,20 @@ class ClientHandler:
         
         # Announce departure to other clients
         if self.username:
+            current_room = self.default_room
+            if self.get_room:
+                current_room = self.get_room(self)
+
             leave_msg = MessageProtocol.create_message(
                 MessageProtocol.TYPE_LEAVE,
                 self.username,
-                f"{self.username} left the chat"
+                f"{self.username} left the chat",
+                room=current_room
             )
-            self.broadcast(leave_msg, exclude=self)
+            if self.broadcast_room:
+                self.broadcast_room(current_room, leave_msg, exclude=self)
+            else:
+                self.broadcast(leave_msg, exclude=self)
             if self.persist_message:
                 self.persist_message(leave_msg)
             if self.on_disconnect:

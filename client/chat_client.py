@@ -236,6 +236,7 @@ class ChatClient:
         print("=" * 60)
         print("Connected to Pulse-Chat!")
         print("Type your messages and press Enter to send.")
+        print("Commands: /rooms, /join <room>, /leave, /roommsg <message>")
         print("Type '/quit' to exit.")
         print("=" * 60)
         print()
@@ -253,6 +254,52 @@ class ChatClient:
                     # Handle special commands
                     if user_input.lower() == '/quit':
                         break
+
+                    if user_input.lower() == '/rooms':
+                        rooms_message = MessageProtocol.create_message(
+                            MessageProtocol.TYPE_ROOM_LIST,
+                            self.username,
+                            ""
+                        )
+                        self._send_message(rooms_message)
+                        continue
+
+                    if user_input.lower().startswith('/join '):
+                        room_name = user_input[6:].strip()
+                        if not room_name:
+                            print("[CLIENT] Usage: /join <room_name>")
+                            continue
+
+                        join_room_message = MessageProtocol.create_message(
+                            MessageProtocol.TYPE_ROOM_JOIN,
+                            self.username,
+                            room_name
+                        )
+                        self._send_message(join_room_message)
+                        continue
+
+                    if user_input.lower() == '/leave':
+                        leave_room_message = MessageProtocol.create_message(
+                            MessageProtocol.TYPE_ROOM_LEAVE,
+                            self.username,
+                            ""
+                        )
+                        self._send_message(leave_room_message)
+                        continue
+
+                    if user_input.lower().startswith('/roommsg '):
+                        room_text = user_input[9:].strip()
+                        if not room_text:
+                            print("[CLIENT] Usage: /roommsg <message>")
+                            continue
+
+                        room_chat_message = MessageProtocol.create_message(
+                            MessageProtocol.TYPE_CHAT,
+                            self.username,
+                            room_text
+                        )
+                        self._send_message(room_chat_message)
+                        continue
                     
                     if user_input.strip():
                         if not self.connected:
