@@ -19,6 +19,10 @@ import ssl
 import threading
 import sys
 import time
+import os
+import uuid
+import base64
+import hashlib
 from utils.message_protocol import MessageProtocol
 
 
@@ -52,6 +56,12 @@ class ChatClient:
         self.receive_thread = None
         self.connection_thread = None
         self.socket_lock = threading.Lock()
+        self.current_room = 'lobby'
+        self.file_chunk_size = 16 * 1024
+        self.download_dir = os.path.join(os.getcwd(), 'downloads')
+        self.incoming_file_transfers = {}
+        self.last_dm_target = None
+        self.last_file_send_command = None
     
     def _get_username(self) -> str:
         """Prompt user for their username."""
@@ -195,6 +205,31 @@ class ChatClient:
                 # Decode and display the message
                 message = MessageProtocol.decode_message(data)
                 if message:
+                    msg_type = message.get("type")
+
+                    if msg_type == MessageProtocol.TYPE_FILE_OFFER:
+                        self._handle_file_offer(message)
+                        continue
+                    if msg_type == MessageProtocol.TYPE_FILE_CHUNK:
+                        self._handle_file_chunk(message)
+                        continue
+                    if msg_type == MessageProtocol.TYPE_FILE_END:
+                        self._handle_file_end(message)
+                        continue
+                    if msg_type == MessageProtocol.TYPE_FILE_ACK:
+                        print(MessageProtocol.format_display_message(message))
+                        continue
+                    if msg_type == MessageProtocol.TYPE_FILE_ERROR:
+                        print(MessageProtocol.format_display_message(message))
+                        print("[CLIENT] Retry: run /sendfile <username> <file_path> again.")
+                        continue
+                    if msg_type == MessageProtocol.TYPE_ERROR:
+                        print(MessageProtocol.format_display_message(message))
+                        if "DM" in str(message.get("content", "")).upper() or "offline" in str(message.get("content", "")).lower():
+                            if self.last_dm_target:
+                                print(f"[CLIENT] Retry DM later: /dm {self.last_dm_target} <message>")
+                        continue
+
                     # Format and display the message
                     display_text = MessageProtocol.format_display_message(message)
                     print(display_text)
@@ -236,6 +271,7 @@ class ChatClient:
         print("=" * 60)
         print("Connected to Pulse-Chat!")
         print("Type your messages and press Enter to send.")
+        print("Commands: /join <room>, /leave, /dm <user> <message>, /sendfile <user> <path>")
         print("Type '/quit' to exit.")
         print("=" * 60)
         print()
@@ -253,6 +289,61 @@ class ChatClient:
                     # Handle special commands
                     if user_input.lower() == '/quit':
                         break
+
+                    if user_input.lower().startswith('/join '):
+                        room = user_input[6:].strip()
+                        if not room:
+                            print("[CLIENT] Usage: /join <room>")
+                            continue
+                        self.current_room = room
+                        join_message = MessageProtocol.create_message(
+                            MessageProtocol.TYPE_ROOM_JOIN,
+                            self.username,
+                            room,
+                            room_name=room
+                        )
+                        self._send_message(join_message)
+                        continue
+
+                    if user_input.lower() == '/leave':
+                        leave_room_message = MessageProtocol.create_message(
+                            MessageProtocol.TYPE_ROOM_LEAVE,
+                            self.username,
+                            self.current_room,
+                            room_name=self.current_room
+                        )
+                        self._send_message(leave_room_message)
+                        self.current_room = 'lobby'
+                        continue
+
+                    if user_input.lower().startswith('/dm '):
+                        parts = user_input.split(' ', 2)
+                        if len(parts) < 3 or not parts[1].strip() or not parts[2].strip():
+                            print("[CLIENT] Usage: /dm <user> <message>")
+                            continue
+                        target = parts[1].strip()
+                        content = parts[2].strip()
+                        self.last_dm_target = target
+                        dm_message = MessageProtocol.create_message(
+                            MessageProtocol.TYPE_PRIVATE,
+                            self.username,
+                            content,
+                            to_username=target,
+                            message_id=str(uuid.uuid4())
+                        )
+                        self._send_message(dm_message)
+                        continue
+
+                    if user_input.lower().startswith('/sendfile '):
+                        parts = user_input.split(' ', 2)
+                        if len(parts) < 3 or not parts[1].strip() or not parts[2].strip():
+                            print("[CLIENT] Usage: /sendfile <user> <file_path>")
+                            continue
+                        target = parts[1].strip()
+                        file_path = parts[2].strip().strip('"')
+                        self._send_file(target, file_path)
+                        self.last_file_send_command = f"/sendfile {target} {file_path}"
+                        continue
                     
                     if user_input.strip():
                         if not self.connected:
@@ -263,7 +354,8 @@ class ChatClient:
                         chat_message = MessageProtocol.create_message(
                             MessageProtocol.TYPE_CHAT,
                             self.username,
-                            user_input
+                            user_input,
+                            room_name=self.current_room
                         )
                         self._send_message(chat_message)
                 
@@ -294,10 +386,190 @@ class ChatClient:
 
         self._mark_disconnected()
 
+        # Purge partial downloads on disconnect to avoid hanging transfer state.
+        for transfer in list(self.incoming_file_transfers.values()):
+            temp_path = transfer.get('temp_path')
+            if temp_path and os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except Exception:
+                    pass
+        self.incoming_file_transfers.clear()
+
         if self.connection_thread and self.connection_thread.is_alive():
             self.connection_thread.join(timeout=1)
         
         print("\n[CLIENT] Disconnected")
+
+    def _handle_file_offer(self, message: dict):
+        transfer_id = (message.get('transfer_id') or '').strip()
+        if not transfer_id:
+            return
+
+        filename = os.path.basename(message.get('filename', 'download.bin'))
+        os.makedirs(self.download_dir, exist_ok=True)
+        final_path = os.path.join(self.download_dir, filename)
+        temp_path = final_path + '.part'
+
+        self.incoming_file_transfers[transfer_id] = {
+            'final_path': final_path,
+            'temp_path': temp_path,
+            'checksum': message.get('checksum', ''),
+            'size': int(message.get('size', 0)),
+            'from': message.get('username', '')
+        }
+
+        ack = MessageProtocol.create_message(
+            MessageProtocol.TYPE_FILE_ACK,
+            self.username,
+            f"accepted:{filename}",
+            transfer_id=transfer_id,
+            to_username=message.get('username', '')
+        )
+        self._send_message(ack)
+        print(f"[CLIENT] Receiving file '{filename}' from {message.get('username', '')}")
+
+    def _handle_file_chunk(self, message: dict):
+        transfer_id = (message.get('transfer_id') or '').strip()
+        state = self.incoming_file_transfers.get(transfer_id)
+        if not state:
+            return
+
+        chunk_data = message.get('chunk_data', '')
+        try:
+            raw = base64.b64decode(chunk_data.encode('ascii'))
+            with open(state['temp_path'], 'ab') as f:
+                f.write(raw)
+        except Exception:
+            self._send_message(
+                MessageProtocol.create_message(
+                    MessageProtocol.TYPE_FILE_ERROR,
+                    self.username,
+                    'Failed to decode/write file chunk.',
+                    transfer_id=transfer_id,
+                    to_username=state.get('from')
+                )
+            )
+
+    def _handle_file_end(self, message: dict):
+        transfer_id = (message.get('transfer_id') or '').strip()
+        state = self.incoming_file_transfers.pop(transfer_id, None)
+        if not state:
+            return
+
+        temp_path = state['temp_path']
+        final_path = state['final_path']
+        expected_size = state['size']
+        expected_checksum = state['checksum']
+
+        if not os.path.exists(temp_path):
+            return
+
+        actual_size = os.path.getsize(temp_path)
+        if expected_size and actual_size != expected_size:
+            os.remove(temp_path)
+            self._send_message(
+                MessageProtocol.create_message(
+                    MessageProtocol.TYPE_FILE_ERROR,
+                    self.username,
+                    f"Size mismatch ({actual_size} != {expected_size}).",
+                    transfer_id=transfer_id,
+                    to_username=state.get('from')
+                )
+            )
+            return
+
+        hasher = hashlib.sha256()
+        with open(temp_path, 'rb') as f:
+            while True:
+                block = f.read(1024 * 1024)
+                if not block:
+                    break
+                hasher.update(block)
+        actual_checksum = hasher.hexdigest()
+        if expected_checksum and actual_checksum != expected_checksum:
+            os.remove(temp_path)
+            self._send_message(
+                MessageProtocol.create_message(
+                    MessageProtocol.TYPE_FILE_ERROR,
+                    self.username,
+                    'Checksum mismatch; file corrupted.',
+                    transfer_id=transfer_id,
+                    to_username=state.get('from')
+                )
+            )
+            return
+
+        os.replace(temp_path, final_path)
+        self._send_message(
+            MessageProtocol.create_message(
+                MessageProtocol.TYPE_FILE_ACK,
+                self.username,
+                f"saved:{os.path.basename(final_path)}",
+                transfer_id=transfer_id,
+                to_username=state.get('from')
+            )
+        )
+        print(f"[CLIENT] File saved: {final_path}")
+
+    def _send_file(self, target_user: str, file_path: str):
+        if not os.path.exists(file_path) or not os.path.isfile(file_path):
+            print(f"[CLIENT] File not found: {file_path}")
+            return
+
+        transfer_id = str(uuid.uuid4())
+        filename = os.path.basename(file_path)
+        file_size = os.path.getsize(file_path)
+
+        hasher = hashlib.sha256()
+        with open(file_path, 'rb') as f:
+            while True:
+                block = f.read(1024 * 1024)
+                if not block:
+                    break
+                hasher.update(block)
+        checksum = hasher.hexdigest()
+
+        offer = MessageProtocol.create_message(
+            MessageProtocol.TYPE_FILE_OFFER,
+            self.username,
+            f"sending:{filename}",
+            transfer_id=transfer_id,
+            filename=filename,
+            size=file_size,
+            checksum=checksum,
+            to_username=target_user
+        )
+        self._send_message(offer)
+
+        with open(file_path, 'rb') as f:
+            chunk_index = 0
+            while True:
+                block = f.read(self.file_chunk_size)
+                if not block:
+                    break
+                encoded = base64.b64encode(block).decode('ascii')
+                chunk_msg = MessageProtocol.create_message(
+                    MessageProtocol.TYPE_FILE_CHUNK,
+                    self.username,
+                    f"chunk:{chunk_index}",
+                    transfer_id=transfer_id,
+                    chunk_index=chunk_index,
+                    chunk_data=encoded,
+                    to_username=target_user
+                )
+                self._send_message(chunk_msg)
+                chunk_index += 1
+
+        end_msg = MessageProtocol.create_message(
+            MessageProtocol.TYPE_FILE_END,
+            self.username,
+            'complete',
+            transfer_id=transfer_id,
+            to_username=target_user
+        )
+        self._send_message(end_msg)
+        print(f"[CLIENT] File sent with transfer id: {transfer_id}")
 
 
 if __name__ == "__main__":
