@@ -19,7 +19,7 @@ import socket
 import ssl
 import threading
 import os
-from typing import List, Optional
+from typing import Dict, List, Optional, Set
 from server.client_handler import ClientHandler
 from server.user_store import UserStore
 from utils.message_protocol import MessageProtocol
@@ -51,11 +51,17 @@ class ChatServer:
         self.cert_file = cert_file
         self.key_file = key_file
         self.user_store = UserStore(base_dir='data')
+        self.default_room = 'lobby'
         
         # List of connected clients - needs thread-safe access
         self.clients: List[ClientHandler] = []
         # Lock for thread-safe access to the clients list
         self.clients_lock = threading.Lock()
+
+        # Room state
+        self.room_lock = threading.Lock()
+        self.room_to_clients: Dict[str, Set[ClientHandler]] = {self.default_room: set()}
+        self.client_to_room: Dict[ClientHandler, str] = {}
         
         # Server state
         self.running = False
@@ -127,10 +133,16 @@ class ChatServer:
                         client_socket=client_socket,
                         client_address=client_address,
                         broadcast_callback=self.broadcast_message,
+                        room_broadcast_callback=self.broadcast_to_room,
                         remove_callback=self.remove_client,
                         login_callback=self.handle_user_login,
                         disconnect_callback=self.handle_user_disconnect,
-                        persist_callback=self.persist_message_for_users
+                        persist_callback=self.persist_message_for_users,
+                        join_room_callback=self.join_room,
+                        leave_room_callback=self.leave_current_room,
+                        list_rooms_callback=self.list_rooms,
+                        get_room_callback=self.get_client_room,
+                        default_room=self.default_room
                     )
                     
                     # Add to clients list (thread-safe)
@@ -188,6 +200,116 @@ class ChatServer:
             if client in self.clients:
                 self.clients.remove(client)
                 print(f"[SERVER] Removed client. Active clients: {len(self.clients)}")
+
+        self._remove_client_from_room(client)
+
+    def _is_valid_room_name(self, room_name: str) -> bool:
+        if not room_name:
+            return False
+        if len(room_name) > 32:
+            return False
+        return all(ch.isalnum() or ch in ('_', '-') for ch in room_name)
+
+    def _remove_client_from_room(self, client: ClientHandler):
+        with self.room_lock:
+            room_name = self.client_to_room.pop(client, None)
+            if not room_name:
+                return
+
+            members = self.room_to_clients.get(room_name)
+            if members:
+                members.discard(client)
+
+            if room_name != self.default_room and members is not None and len(members) == 0:
+                self.room_to_clients.pop(room_name, None)
+
+    def join_room(self, client: ClientHandler, room_name: str) -> dict:
+        """Move a client to the requested room with validation and isolation."""
+        room_name = (room_name or '').strip()
+        if not self._is_valid_room_name(room_name):
+            return {
+                'ok': False,
+                'error': "Invalid room name. Use letters, numbers, '_' or '-', max 32 chars."
+            }
+
+        with self.room_lock:
+            current_room = self.client_to_room.get(client)
+            if current_room == room_name:
+                return {
+                    'ok': False,
+                    'error': f"You are already in room '{room_name}'.",
+                    'room': current_room
+                }
+
+            if current_room:
+                old_members = self.room_to_clients.get(current_room)
+                if old_members:
+                    old_members.discard(client)
+                    if current_room != self.default_room and len(old_members) == 0:
+                        self.room_to_clients.pop(current_room, None)
+
+            room_members = self.room_to_clients.setdefault(room_name, set())
+            room_members.add(client)
+            self.client_to_room[client] = room_name
+
+        return {
+            'ok': True,
+            'room': room_name,
+            'previous_room': current_room
+        }
+
+    def leave_current_room(self, client: ClientHandler) -> dict:
+        """Leave current room and move the client back to default room."""
+        with self.room_lock:
+            current_room = self.client_to_room.get(client)
+            if not current_room:
+                self.room_to_clients.setdefault(self.default_room, set()).add(client)
+                self.client_to_room[client] = self.default_room
+                return {
+                    'ok': True,
+                    'left_room': None,
+                    'room': self.default_room
+                }
+
+            if current_room == self.default_room:
+                return {
+                    'ok': False,
+                    'error': f"You are already in default room '{self.default_room}'.",
+                    'room': self.default_room
+                }
+
+            members = self.room_to_clients.get(current_room)
+            if members:
+                members.discard(client)
+                if len(members) == 0:
+                    self.room_to_clients.pop(current_room, None)
+
+            default_members = self.room_to_clients.setdefault(self.default_room, set())
+            default_members.add(client)
+            self.client_to_room[client] = self.default_room
+
+        return {
+            'ok': True,
+            'left_room': current_room,
+            'room': self.default_room
+        }
+
+    def get_client_room(self, client: ClientHandler) -> str:
+        with self.room_lock:
+            return self.client_to_room.get(client, self.default_room)
+
+    def list_rooms(self) -> List[str]:
+        with self.room_lock:
+            return sorted(self.room_to_clients.keys())
+
+    def broadcast_to_room(self, room_name: str, message: dict, exclude: Optional[ClientHandler] = None):
+        """Broadcast message only to clients inside the specified room."""
+        with self.room_lock:
+            room_members = list(self.room_to_clients.get(room_name, set()))
+
+        for client in room_members:
+            if client != exclude:
+                client.send_message(message)
 
     def handle_user_login(self, username: str) -> dict:
         """Register user login and return profile/history payload."""
