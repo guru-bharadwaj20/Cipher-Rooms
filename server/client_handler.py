@@ -13,6 +13,7 @@ Key Networking Concepts:
 
 import threading
 import ssl
+import uuid
 from typing import Callable, Optional
 from utils.message_protocol import MessageProtocol
 
@@ -31,7 +32,10 @@ class ClientHandler:
         remove_callback: Callable,
         login_callback: Optional[Callable] = None,
         disconnect_callback: Optional[Callable] = None,
-        persist_callback: Optional[Callable] = None
+        persist_callback: Optional[Callable] = None,
+        register_user_callback: Optional[Callable] = None,
+        unregister_user_callback: Optional[Callable] = None,
+        private_message_callback: Optional[Callable] = None
     ):
         """
         Initialize the client handler.
@@ -49,6 +53,9 @@ class ClientHandler:
         self.on_login = login_callback
         self.on_disconnect = disconnect_callback
         self.persist_message = persist_callback
+        self.register_active_user = register_user_callback
+        self.unregister_active_user = unregister_user_callback
+        self.private_message = private_message_callback
         self.username: Optional[str] = None
         self.running = True
         
@@ -84,6 +91,9 @@ class ClientHandler:
             if message and message.get("type") == MessageProtocol.TYPE_JOIN:
                 self.username = message.get("username", "Unknown")
                 print(f"[SERVER] {self.username} connected from {self.address}")
+
+                if self.register_active_user:
+                    self.register_active_user(self.username, self)
 
                 login_info = {
                     'is_returning': False,
@@ -127,6 +137,57 @@ class ClientHandler:
                         self.broadcast(message, exclude=None)
                         if self.persist_message:
                             self.persist_message(message)
+
+                    elif msg_type == MessageProtocol.TYPE_PRIVATE:
+                        to_username = (message.get('to_username') or '').strip()
+                        content = message.get('content', '')
+                        message_id = message.get('message_id') or str(uuid.uuid4())
+
+                        if not to_username:
+                            self.send_message(
+                                MessageProtocol.create_message(
+                                    MessageProtocol.TYPE_ERROR,
+                                    'Server',
+                                    "Private message missing recipient. Use /dm <username> <message>."
+                                )
+                            )
+                            continue
+
+                        if to_username == self.username:
+                            self.send_message(
+                                MessageProtocol.create_message(
+                                    MessageProtocol.TYPE_ERROR,
+                                    'Server',
+                                    "Cannot send private message to yourself."
+                                )
+                            )
+                            continue
+
+                        result = {'ok': False, 'error': 'Private message service unavailable.'}
+                        if self.private_message:
+                            result = self.private_message(
+                                self.username,
+                                to_username,
+                                content,
+                                message_id
+                            )
+
+                        if result.get('ok'):
+                            self.send_message(
+                                MessageProtocol.create_message(
+                                    MessageProtocol.TYPE_SYSTEM,
+                                    'Server',
+                                    f"DM delivered to {to_username} (id: {result.get('message_id', message_id)})."
+                                )
+                            )
+                        else:
+                            self.send_message(
+                                MessageProtocol.create_message(
+                                    MessageProtocol.TYPE_ERROR,
+                                    'Server',
+                                    result.get('error', 'Private message delivery failed.')
+                                )
+                            )
                     
                     elif msg_type == MessageProtocol.TYPE_LEAVE:
                         # Client wants to leave
@@ -204,6 +265,9 @@ class ClientHandler:
         
         # Announce departure to other clients
         if self.username:
+            if self.unregister_active_user:
+                self.unregister_active_user(self.username, self)
+
             leave_msg = MessageProtocol.create_message(
                 MessageProtocol.TYPE_LEAVE,
                 self.username,

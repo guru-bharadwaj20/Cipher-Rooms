@@ -19,7 +19,8 @@ import socket
 import ssl
 import threading
 import os
-from typing import List, Optional
+import uuid
+from typing import Dict, List, Optional
 from server.client_handler import ClientHandler
 from server.user_store import UserStore
 from utils.message_protocol import MessageProtocol
@@ -56,6 +57,10 @@ class ChatServer:
         self.clients: List[ClientHandler] = []
         # Lock for thread-safe access to the clients list
         self.clients_lock = threading.Lock()
+
+        # Active user routing map for direct messages
+        self.user_lock = threading.Lock()
+        self.user_to_client: Dict[str, ClientHandler] = {}
         
         # Server state
         self.running = False
@@ -130,7 +135,10 @@ class ChatServer:
                         remove_callback=self.remove_client,
                         login_callback=self.handle_user_login,
                         disconnect_callback=self.handle_user_disconnect,
-                        persist_callback=self.persist_message_for_users
+                        persist_callback=self.persist_message_for_users,
+                        register_user_callback=self.register_active_user,
+                        unregister_user_callback=self.unregister_active_user,
+                        private_message_callback=self.route_private_message
                     )
                     
                     # Add to clients list (thread-safe)
@@ -189,6 +197,61 @@ class ChatServer:
                 self.clients.remove(client)
                 print(f"[SERVER] Removed client. Active clients: {len(self.clients)}")
 
+    def register_active_user(self, username: str, handler: ClientHandler):
+        """Register or refresh active user route for private messaging."""
+        if not username:
+            return
+        with self.user_lock:
+            self.user_to_client[username] = handler
+
+    def unregister_active_user(self, username: str, handler: Optional[ClientHandler] = None):
+        """Remove active user route when user disconnects."""
+        if not username:
+            return
+        with self.user_lock:
+            existing = self.user_to_client.get(username)
+            if existing is None:
+                return
+            if handler is None or existing == handler:
+                self.user_to_client.pop(username, None)
+
+    def route_private_message(
+        self,
+        from_username: str,
+        to_username: str,
+        content: str,
+        message_id: Optional[str] = None
+    ) -> dict:
+        """Route a private message only to the addressed online user."""
+        with self.user_lock:
+            recipient = self.user_to_client.get(to_username)
+
+        if not recipient:
+            # Offline policy: reject private message delivery when recipient is offline.
+            return {
+                'ok': False,
+                'error': f"User '{to_username}' is offline. DM not delivered.",
+                'offline': True
+            }
+
+        msg_id = message_id or str(uuid.uuid4())
+        dm_message = MessageProtocol.create_message(
+            MessageProtocol.TYPE_PRIVATE,
+            from_username,
+            content,
+            to_username=to_username,
+            message_id=msg_id
+        )
+        recipient.send_message(dm_message)
+
+        # Persist delivered DMs for both sender and receiver history replay.
+        self.user_store.append_message_for_users([from_username, to_username], dm_message)
+
+        return {
+            'ok': True,
+            'message_id': msg_id
+        }
+
     def handle_user_login(self, username: str) -> dict:
         """Register user login and return profile/history payload."""
         login_info = self.user_store.register_login(username)
@@ -212,6 +275,9 @@ class ChatServer:
         Stop the server and clean up resources.
         """
         self.running = False
+
+        with self.user_lock:
+            self.user_to_client.clear()
         
         # Close all client connections
         with self.clients_lock:

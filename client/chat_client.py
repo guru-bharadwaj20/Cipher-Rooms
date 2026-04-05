@@ -19,6 +19,7 @@ import ssl
 import threading
 import sys
 import time
+import uuid
 from utils.message_protocol import MessageProtocol
 
 
@@ -236,6 +237,7 @@ class ChatClient:
         print("=" * 60)
         print("Connected to Pulse-Chat!")
         print("Type your messages and press Enter to send.")
+        print("Type '/dm <username> <message>' to send a direct message.")
         print("Type '/quit' to exit.")
         print("=" * 60)
         print()
@@ -253,6 +255,24 @@ class ChatClient:
                     # Handle special commands
                     if user_input.lower() == '/quit':
                         break
+
+                    if user_input.lower().startswith('/dm '):
+                        parts = user_input.split(' ', 2)
+                        if len(parts) < 3 or not parts[1].strip() or not parts[2].strip():
+                            print("[CLIENT] Usage: /dm <username> <message>")
+                            continue
+
+                        target_user = parts[1].strip()
+                        dm_text = parts[2].strip()
+                        dm_message = MessageProtocol.create_message(
+                            MessageProtocol.TYPE_PRIVATE,
+                            self.username,
+                            dm_text,
+                            to_username=target_user,
+                            message_id=str(uuid.uuid4())
+                        )
+                        self._send_message(dm_message)
+                        continue
                     
                     if user_input.strip():
                         if not self.connected:

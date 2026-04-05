@@ -29,9 +29,10 @@ class MessageProtocol:
     TYPE_LEAVE = "leave"
     TYPE_ERROR = "error"
     TYPE_SYSTEM = "system"
+    TYPE_PRIVATE = "private"
     
     @staticmethod
-    def create_message(msg_type: str, username: str, content: str) -> Dict:
+    def create_message(msg_type: str, username: str, content: str, **extra_fields) -> Dict:
         """
         Create a message dictionary with the standard format.
         
@@ -43,12 +44,15 @@ class MessageProtocol:
         Returns:
             Dictionary containing the formatted message
         """
-        return {
+        message = {
             "type": msg_type,
             "username": username,
             "content": content,
             "timestamp": datetime.now().isoformat()
         }
+        if extra_fields:
+            message.update(extra_fields)
+        return message
     
     @staticmethod
     def encode_message(message: Dict) -> bytes:
@@ -101,9 +105,14 @@ class MessageProtocol:
         msg_type = message.get("type", "")
         username = message.get("username", "Unknown")
         content = message.get("content", "")
+        to_username = message.get("to_username")
         
         if msg_type == MessageProtocol.TYPE_CHAT:
             return f"[{username}]: {content}"
+        elif msg_type == MessageProtocol.TYPE_PRIVATE:
+            if to_username:
+                return f"[DM] [{username} -> {to_username}]: {content}"
+            return f"[DM] [{username}]: {content}"
         elif msg_type == MessageProtocol.TYPE_JOIN:
             return f"*** {username} joined the chat ***"
         elif msg_type == MessageProtocol.TYPE_LEAVE:
