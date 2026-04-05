@@ -65,6 +65,7 @@ class ChatClient:
         self.download_dir = os.path.join(os.getcwd(), 'downloads')
         self.transfer_cleanup_thread = None
         self.last_seq_per_room = {}
+        self.current_room = 'lobby'
     
     def _get_username(self) -> str:
         """Prompt user for their username."""
@@ -582,6 +583,7 @@ class ChatClient:
         print("=" * 60)
         print("Connected to Pulse-Chat!")
         print("Type your messages and press Enter to send.")
+        print("Type '/join <room>' to switch room and load its history.")
         print("Type '/dm <username> <message>' to send a direct message.")
         print("Type '/sendfile <username|all> <file_path>' to send a file.")
         print("Type '/quit' to exit.")
@@ -601,6 +603,23 @@ class ChatClient:
                     # Handle special commands
                     if user_input.lower() == '/quit':
                         break
+
+                    if user_input.lower().startswith('/join '):
+                        room_name = user_input[6:].strip()
+                        if not room_name:
+                            print("[CLIENT] Usage: /join <room>")
+                            continue
+
+                        self.current_room = room_name
+                        join_room_message = MessageProtocol.create_message(
+                            MessageProtocol.TYPE_SYSTEM,
+                            self.username,
+                            room_name,
+                            command='room_join',
+                            room_name=room_name
+                        )
+                        self._send_message(join_room_message)
+                        continue
 
                     if user_input.lower().startswith('/dm '):
                         parts = user_input.split(' ', 2)
@@ -640,7 +659,8 @@ class ChatClient:
                         chat_message = MessageProtocol.create_message(
                             MessageProtocol.TYPE_CHAT,
                             self.username,
-                            user_input
+                            user_input,
+                            room_name=self.current_room
                         )
                         self._send_message(chat_message)
                 

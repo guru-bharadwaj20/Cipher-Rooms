@@ -142,6 +142,8 @@ class ChatServer:
                         ordered_room_publish_callback=self.publish_room_ordered,
                         remove_callback=self.remove_client,
                         login_callback=self.handle_user_login,
+                        room_history_callback=self.get_room_history,
+                        persist_room_history_callback=self.persist_room_message,
                         disconnect_callback=self.handle_user_disconnect,
                         persist_callback=self.persist_message_for_users,
                         register_user_callback=self.register_active_user,
@@ -371,10 +373,18 @@ class ChatServer:
     def handle_user_login(self, username: str) -> dict:
         """Register user login and return profile/history payload."""
         login_info = self.user_store.register_login(username)
-        history = self.user_store.get_user_history(username, limit=100)
         payload = dict(login_info)
-        payload['history'] = history
+        # Room timeline replay is handled explicitly on room join.
+        payload['history'] = []
         return payload
+
+    def get_room_history(self, room_name: str, limit: int = 50) -> List[dict]:
+        """Get latest timeline messages for a room."""
+        return self.user_store.get_room_history(room_name, limit=limit)
+
+    def persist_room_message(self, room_name: str, message: dict):
+        """Persist one room timeline message."""
+        self.user_store.append_room_message(room_name, message)
 
     def handle_user_disconnect(self, username: str):
         """Persist last-seen timestamp when user disconnects."""

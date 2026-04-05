@@ -32,6 +32,8 @@ class ClientHandler:
         ordered_room_publish_callback: Optional[Callable],
         remove_callback: Callable,
         login_callback: Optional[Callable] = None,
+        room_history_callback: Optional[Callable] = None,
+        persist_room_history_callback: Optional[Callable] = None,
         disconnect_callback: Optional[Callable] = None,
         persist_callback: Optional[Callable] = None,
         register_user_callback: Optional[Callable] = None,
@@ -54,6 +56,8 @@ class ClientHandler:
         self.publish_ordered = ordered_room_publish_callback
         self.remove_client = remove_callback
         self.on_login = login_callback
+        self.get_room_history = room_history_callback
+        self.persist_room_history = persist_room_history_callback
         self.on_disconnect = disconnect_callback
         self.persist_message = persist_callback
         self.register_active_user = register_user_callback
@@ -61,6 +65,7 @@ class ClientHandler:
         self.private_message = private_message_callback
         self.route_file_frame = file_frame_callback
         self.username: Optional[str] = None
+        self.current_room = 'lobby'
         self.running = True
         
         # Create a thread for this client
@@ -110,12 +115,15 @@ class ClientHandler:
                         login_info.update(info)
 
                 self._send_login_context(login_info)
+
+                self._send_room_history(self.current_room, limit=50)
                 
                 # Broadcast join message to all clients
                 join_msg = MessageProtocol.create_message(
                     MessageProtocol.TYPE_JOIN,
                     self.username,
-                    f"{self.username} joined the chat"
+                    f"{self.username} joined the chat",
+                    room_name=self.current_room
                 )
                 self.broadcast(join_msg, exclude=self)
                 if self.persist_message:
@@ -136,7 +144,8 @@ class ClientHandler:
                     msg_type = message.get("type")
                     
                     if msg_type == MessageProtocol.TYPE_CHAT:
-                        room_name = (message.get('room_name') or message.get('room') or 'global').strip() or 'global'
+                        room_name = (message.get('room_name') or message.get('room') or self.current_room).strip() or self.current_room
+                        self.current_room = room_name
                         print(f"[{room_name}] [{self.username}]: {message.get('content', '')}")
 
                         if self.publish_ordered:
@@ -147,6 +156,30 @@ class ClientHandler:
 
                         if self.persist_message:
                             self.persist_message(message)
+                        if self.persist_room_history:
+                            self.persist_room_history(room_name, message)
+
+                    elif msg_type == MessageProtocol.TYPE_SYSTEM and message.get('command') == 'room_join':
+                        requested_room = (message.get('room_name') or message.get('content') or '').strip()
+                        if not requested_room:
+                            self.send_message(
+                                MessageProtocol.create_message(
+                                    MessageProtocol.TYPE_ERROR,
+                                    'Server',
+                                    "Room join failed: missing room name. Use /join <room>."
+                                )
+                            )
+                            continue
+
+                        self.current_room = requested_room
+                        self.send_message(
+                            MessageProtocol.create_message(
+                                MessageProtocol.TYPE_SYSTEM,
+                                'Server',
+                                f"Joined room '{requested_room}'."
+                            )
+                        )
+                        self._send_room_history(requested_room, limit=50)
 
                     elif msg_type == MessageProtocol.TYPE_PRIVATE:
                         to_username = (message.get('to_username') or '').strip()
@@ -291,9 +324,35 @@ class ClientHandler:
                 MessageProtocol.create_message(
                     MessageProtocol.TYPE_SYSTEM,
                     'Server',
-                    "No previous chat history found for this user."
+                    "Profile loaded. Room history appears when you join a room."
                 )
             )
+
+    def _send_room_history(self, room_name: str, limit: int = 50):
+        """Replay latest room timeline for the client after room join/login."""
+        if not self.get_room_history:
+            return
+
+        history = self.get_room_history(room_name, limit=limit)
+        if not history:
+            self.send_message(
+                MessageProtocol.create_message(
+                    MessageProtocol.TYPE_SYSTEM,
+                    'Server',
+                    f"No previous messages in room '{room_name}'."
+                )
+            )
+            return
+
+        self.send_message(
+            MessageProtocol.create_message(
+                MessageProtocol.TYPE_SYSTEM,
+                'Server',
+                f"Loading {len(history)} previous messages from room '{room_name}'..."
+            )
+        )
+        for old_message in history:
+            self.send_message(old_message)
     
     def cleanup(self):
         """
