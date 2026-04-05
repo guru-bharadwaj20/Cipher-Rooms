@@ -13,6 +13,8 @@ A secure, multi-client chat server implementation using Python with SSL/TLS encr
 - **Secure Communication:** SSL/TLS encryption using self-signed certificates
 - **Multi-Client Support:** Concurrent client handling using threads
 - **Real-Time Messaging:** Broadcast messages to all connected clients
+- **Persistent User Profiles:** Returning users are recognized with login metadata
+- **Chat History Replay:** User-specific previous chats are loaded on login
 - **Graceful Error Handling:** Proper handling of disconnections and errors
 - **Modular Architecture:** Clean separation of concerns with well-documented code
 - **Educational Comments:** Detailed explanations of networking concepts
@@ -88,15 +90,21 @@ Pulse-Chat/
 - Handles receiving messages from one client
 - Sends messages to one client
 - Manages client lifecycle (join/leave)
+- Sends login context (welcome + history replay)
 - Thread-safe communication with server
 
-**3. Client (`client/chat_client.py`)**
+**3. User Store (`server/user_store.py`)**
+- Persists user profiles in `data/profiles.json`
+- Persists per-user chat history in `data/history/*.jsonl`
+- Updates `last_seen` when users disconnect
+
+**4. Client (`client/chat_client.py`)**
 - Connects to server via TLS
 - Runs receive loop in separate thread
 - Handles user input in main thread
 - Displays incoming messages
 
-**4. Message Protocol (`utils/message_protocol.py`)**
+**5. Message Protocol (`utils/message_protocol.py`)**
 - JSON-based message format
 - Message types: chat, join, leave, system, error
 - Encoding/decoding utilities

@@ -28,7 +28,10 @@ class ClientHandler:
         client_socket: ssl.SSLSocket,
         client_address: tuple,
         broadcast_callback: Callable,
-        remove_callback: Callable
+        remove_callback: Callable,
+        login_callback: Optional[Callable] = None,
+        disconnect_callback: Optional[Callable] = None,
+        persist_callback: Optional[Callable] = None
     ):
         """
         Initialize the client handler.
@@ -43,6 +46,9 @@ class ClientHandler:
         self.address = client_address
         self.broadcast = broadcast_callback
         self.remove_client = remove_callback
+        self.on_login = login_callback
+        self.on_disconnect = disconnect_callback
+        self.persist_message = persist_callback
         self.username: Optional[str] = None
         self.running = True
         
@@ -78,6 +84,18 @@ class ClientHandler:
             if message and message.get("type") == MessageProtocol.TYPE_JOIN:
                 self.username = message.get("username", "Unknown")
                 print(f"[SERVER] {self.username} connected from {self.address}")
+
+                login_info = {
+                    'is_returning': False,
+                    'profile': {},
+                    'history': []
+                }
+                if self.on_login:
+                    info = self.on_login(self.username)
+                    if isinstance(info, dict):
+                        login_info.update(info)
+
+                self._send_login_context(login_info)
                 
                 # Broadcast join message to all clients
                 join_msg = MessageProtocol.create_message(
@@ -86,6 +104,8 @@ class ClientHandler:
                     f"{self.username} joined the chat"
                 )
                 self.broadcast(join_msg, exclude=self)
+                if self.persist_message:
+                    self.persist_message(join_msg)
             
             # Main message receiving loop
             while self.running:
@@ -105,6 +125,8 @@ class ClientHandler:
                         # Regular chat message - broadcast to all clients
                         print(f"[{self.username}]: {message.get('content', '')}")
                         self.broadcast(message, exclude=None)
+                        if self.persist_message:
+                            self.persist_message(message)
                     
                     elif msg_type == MessageProtocol.TYPE_LEAVE:
                         # Client wants to leave
@@ -130,6 +152,48 @@ class ClientHandler:
         except Exception as e:
             print(f"[SERVER] Error sending to {self.username}: {e}")
             self.running = False
+
+    def _send_login_context(self, login_info: dict):
+        """Send profile and history context to the logging-in client."""
+        is_returning = bool(login_info.get('is_returning'))
+        profile = login_info.get('profile', {}) or {}
+        history = login_info.get('history', []) or []
+
+        if is_returning:
+            last_seen = profile.get('last_seen')
+            if last_seen:
+                welcome_text = f"Welcome back {self.username}! Last seen: {last_seen}"
+            else:
+                welcome_text = f"Welcome back {self.username}!"
+        else:
+            welcome_text = f"Welcome {self.username}! Your profile has been created."
+
+        self.send_message(
+            MessageProtocol.create_message(
+                MessageProtocol.TYPE_SYSTEM,
+                'Server',
+                welcome_text
+            )
+        )
+
+        if history:
+            self.send_message(
+                MessageProtocol.create_message(
+                    MessageProtocol.TYPE_SYSTEM,
+                    'Server',
+                    f"Loading {len(history)} previous messages..."
+                )
+            )
+            for old_message in history:
+                self.send_message(old_message)
+        else:
+            self.send_message(
+                MessageProtocol.create_message(
+                    MessageProtocol.TYPE_SYSTEM,
+                    'Server',
+                    "No previous chat history found for this user."
+                )
+            )
     
     def cleanup(self):
         """
@@ -146,6 +210,10 @@ class ClientHandler:
                 f"{self.username} left the chat"
             )
             self.broadcast(leave_msg, exclude=self)
+            if self.persist_message:
+                self.persist_message(leave_msg)
+            if self.on_disconnect:
+                self.on_disconnect(self.username)
             print(f"[SERVER] {self.username} disconnected")
         
         # Close the socket

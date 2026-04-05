@@ -18,6 +18,7 @@ import socket
 import ssl
 import threading
 import sys
+import time
 from utils.message_protocol import MessageProtocol
 
 
@@ -43,10 +44,14 @@ class ChatClient:
         self.server_host = server_host
         self.server_port = server_port
         self.username = username or self._get_username()
+        self.reconnect_delay = 3
         
         self.socket = None
         self.running = False
+        self.connected = False
         self.receive_thread = None
+        self.connection_thread = None
+        self.socket_lock = threading.Lock()
     
     def _get_username(self) -> str:
         """Prompt user for their username."""
@@ -68,6 +73,10 @@ class ChatClient:
         5. Send join message with username
         """
         try:
+            with self.socket_lock:
+                if self.connected:
+                    return True
+
             # Step 1: Create a TCP socket
             client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             
@@ -81,7 +90,7 @@ class ChatClient:
             ssl_context.verify_mode = ssl.CERT_NONE
             
             # Step 3: Wrap the socket with SSL
-            self.socket = ssl_context.wrap_socket(
+            secure_socket = ssl_context.wrap_socket(
                 client_socket,
                 server_hostname=self.server_host
             )
@@ -89,9 +98,13 @@ class ChatClient:
             # Step 4: Connect to the server
             # The TLS handshake happens here automatically
             print(f"[CLIENT] Connecting to {self.server_host}:{self.server_port}...")
-            self.socket.connect((self.server_host, self.server_port))
+            secure_socket.connect((self.server_host, self.server_port))
             print(f"[CLIENT] Secure connection established!")
-            print(f"[CLIENT] Using cipher: {self.socket.cipher()}\n")
+            print(f"[CLIENT] Using cipher: {secure_socket.cipher()}\n")
+
+            with self.socket_lock:
+                self.socket = secure_socket
+                self.connected = True
             
             # Step 5: Send join message
             join_message = MessageProtocol.create_message(
@@ -100,8 +113,13 @@ class ChatClient:
                 f"{self.username} joined"
             )
             self._send_message(join_message)
-            
-            self.running = True
+
+            self.receive_thread = threading.Thread(
+                target=self._receive_messages,
+                daemon=True
+            )
+            self.receive_thread.start()
+
             return True
         
         except ConnectionRefusedError:
@@ -113,6 +131,22 @@ class ChatClient:
         except Exception as e:
             print(f"[CLIENT] Connection error: {e}")
             return False
+
+    def _mark_disconnected(self, reason: str = None):
+        """Mark the connection as disconnected and safely close the socket."""
+        socket_to_close = None
+        with self.socket_lock:
+            if self.connected and reason:
+                print(f"\n[CLIENT] {reason}")
+            self.connected = False
+            socket_to_close = self.socket
+            self.socket = None
+
+        if socket_to_close:
+            try:
+                socket_to_close.close()
+            except Exception:
+                pass
     
     def _send_message(self, message: dict):
         """
@@ -122,11 +156,17 @@ class ChatClient:
             message: Message dictionary to send
         """
         try:
+            with self.socket_lock:
+                sock = self.socket
+
+            if not sock:
+                raise ConnectionError("Not connected to server")
+
             encoded = MessageProtocol.encode_message(message)
-            self.socket.sendall(encoded)
+            sock.sendall(encoded)
         except Exception as e:
             print(f"[CLIENT] Error sending message: {e}")
-            self.running = False
+            self._mark_disconnected("Connection lost while sending message")
     
     def _receive_messages(self):
         """
@@ -134,17 +174,22 @@ class ChatClient:
         Runs in a separate thread to allow simultaneous send/receive.
         """
         try:
+            with self.socket_lock:
+                sock = self.socket
+
+            if not sock:
+                return
+
             # Create a file-like object for line-based reading
-            server_file = self.socket.makefile('rb')
+            server_file = sock.makefile('rb')
             
-            while self.running:
+            while self.running and self.connected:
                 # Read one line (one message) from the server
                 data = server_file.readline()
                 
                 if not data:
                     # Server disconnected
-                    print("\n[CLIENT] Disconnected from server")
-                    self.running = False
+                    self._mark_disconnected("Disconnected from server. Reconnecting...")
                     break
                 
                 # Decode and display the message
@@ -155,12 +200,21 @@ class ChatClient:
                     print(display_text)
         
         except ConnectionResetError:
-            print("\n[CLIENT] Connection lost")
-            self.running = False
+            self._mark_disconnected("Connection lost. Reconnecting...")
         except Exception as e:
-            if self.running:
-                print(f"\n[CLIENT] Error receiving messages: {e}")
-            self.running = False
+            if self.running and self.connected:
+                self._mark_disconnected(f"Error receiving messages: {e}")
+
+    def _connection_manager(self):
+        """Maintain connection by reconnecting until the client is stopped."""
+        while self.running:
+            if not self.connected:
+                connected = self.connect()
+                if not connected and self.running:
+                    print(f"[CLIENT] Reconnect failed. Retrying in {self.reconnect_delay}s...")
+                    time.sleep(self.reconnect_delay)
+            else:
+                time.sleep(0.5)
     
     def start(self):
         """
@@ -169,15 +223,14 @@ class ChatClient:
         Creates a separate thread for receiving messages, then handles
         user input in the main thread.
         """
-        if not self.connect():
-            return
-        
-        # Start the receive thread
-        self.receive_thread = threading.Thread(
-            target=self._receive_messages,
+        self.running = True
+
+        # Keep trying to connect while this client process is running.
+        self.connection_thread = threading.Thread(
+            target=self._connection_manager,
             daemon=True
         )
-        self.receive_thread.start()
+        self.connection_thread.start()
         
         # Display usage instructions
         print("=" * 60)
@@ -202,6 +255,10 @@ class ChatClient:
                         break
                     
                     if user_input.strip():
+                        if not self.connected:
+                            print("[CLIENT] Not connected. Message was not sent.")
+                            continue
+
                         # Create and send chat message
                         chat_message = MessageProtocol.create_message(
                             MessageProtocol.TYPE_CHAT,
@@ -224,7 +281,7 @@ class ChatClient:
         """
         Disconnect from the server and clean up resources.
         """
-        if self.running:
+        if self.running and self.connected:
             # Send leave message
             leave_message = MessageProtocol.create_message(
                 MessageProtocol.TYPE_LEAVE,
@@ -234,13 +291,11 @@ class ChatClient:
             self._send_message(leave_message)
         
         self.running = False
-        
-        # Close the socket
-        if self.socket:
-            try:
-                self.socket.close()
-            except:
-                pass
+
+        self._mark_disconnected()
+
+        if self.connection_thread and self.connection_thread.is_alive():
+            self.connection_thread.join(timeout=1)
         
         print("\n[CLIENT] Disconnected")
 

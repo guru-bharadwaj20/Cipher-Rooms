@@ -21,6 +21,7 @@ import threading
 import os
 from typing import List, Optional
 from server.client_handler import ClientHandler
+from server.user_store import UserStore
 from utils.message_protocol import MessageProtocol
 
 
@@ -49,6 +50,7 @@ class ChatServer:
         self.port = port
         self.cert_file = cert_file
         self.key_file = key_file
+        self.user_store = UserStore(base_dir='data')
         
         # List of connected clients - needs thread-safe access
         self.clients: List[ClientHandler] = []
@@ -125,7 +127,10 @@ class ChatServer:
                         client_socket=client_socket,
                         client_address=client_address,
                         broadcast_callback=self.broadcast_message,
-                        remove_callback=self.remove_client
+                        remove_callback=self.remove_client,
+                        login_callback=self.handle_user_login,
+                        disconnect_callback=self.handle_user_disconnect,
+                        persist_callback=self.persist_message_for_users
                     )
                     
                     # Add to clients list (thread-safe)
@@ -183,6 +188,24 @@ class ChatServer:
             if client in self.clients:
                 self.clients.remove(client)
                 print(f"[SERVER] Removed client. Active clients: {len(self.clients)}")
+
+    def handle_user_login(self, username: str) -> dict:
+        """Register user login and return profile/history payload."""
+        login_info = self.user_store.register_login(username)
+        history = self.user_store.get_user_history(username, limit=100)
+        payload = dict(login_info)
+        payload['history'] = history
+        return payload
+
+    def handle_user_disconnect(self, username: str):
+        """Persist last-seen timestamp when user disconnects."""
+        self.user_store.update_last_seen(username)
+
+    def persist_message_for_users(self, message: dict):
+        """Persist broadcasted message for every known user."""
+        usernames = self.user_store.list_users()
+        if usernames:
+            self.user_store.append_message_for_users(usernames, message)
     
     def stop(self):
         """
