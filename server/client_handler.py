@@ -29,6 +29,7 @@ class ClientHandler:
         client_socket: ssl.SSLSocket,
         client_address: tuple,
         broadcast_callback: Callable,
+        ordered_room_publish_callback: Optional[Callable],
         remove_callback: Callable,
         login_callback: Optional[Callable] = None,
         disconnect_callback: Optional[Callable] = None,
@@ -50,6 +51,7 @@ class ClientHandler:
         self.socket = client_socket
         self.address = client_address
         self.broadcast = broadcast_callback
+        self.publish_ordered = ordered_room_publish_callback
         self.remove_client = remove_callback
         self.on_login = login_callback
         self.on_disconnect = disconnect_callback
@@ -134,9 +136,15 @@ class ClientHandler:
                     msg_type = message.get("type")
                     
                     if msg_type == MessageProtocol.TYPE_CHAT:
-                        # Regular chat message - broadcast to all clients
-                        print(f"[{self.username}]: {message.get('content', '')}")
-                        self.broadcast(message, exclude=None)
+                        room_name = (message.get('room_name') or message.get('room') or 'global').strip() or 'global'
+                        print(f"[{room_name}] [{self.username}]: {message.get('content', '')}")
+
+                        if self.publish_ordered:
+                            message = self.publish_ordered(room_name, message, exclude=None)
+                        else:
+                            message['room_name'] = room_name
+                            self.broadcast(message, exclude=None)
+
                         if self.persist_message:
                             self.persist_message(message)
 

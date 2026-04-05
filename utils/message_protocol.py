@@ -111,8 +111,14 @@ class MessageProtocol:
         username = message.get("username", "Unknown")
         content = message.get("content", "")
         to_username = message.get("to_username")
+        room_name = message.get("room_name")
+        room_seq = message.get("room_seq")
         
         if msg_type == MessageProtocol.TYPE_CHAT:
+            if room_name and room_seq is not None:
+                return f"[{room_name}#{room_seq}] [{username}]: {content}"
+            if room_name:
+                return f"[{room_name}] [{username}]: {content}"
             return f"[{username}]: {content}"
         elif msg_type == MessageProtocol.TYPE_PRIVATE:
             if to_username:

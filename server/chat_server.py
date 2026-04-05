@@ -20,6 +20,7 @@ import ssl
 import threading
 import os
 import uuid
+from queue import Empty, Queue
 from typing import Dict, List, Optional
 from server.client_handler import ClientHandler
 from server.user_store import UserStore
@@ -61,6 +62,12 @@ class ChatServer:
         # Active user routing map for direct messages
         self.user_lock = threading.Lock()
         self.user_to_client: Dict[str, ClientHandler] = {}
+
+        # Ordered per-room publish state
+        self.room_lock = threading.Lock()
+        self.room_sequence_counter: Dict[str, int] = {}
+        self.room_queues: Dict[str, Queue] = {}
+        self.room_workers: Dict[str, threading.Thread] = {}
         
         # Server state
         self.running = False
@@ -132,6 +139,7 @@ class ChatServer:
                         client_socket=client_socket,
                         client_address=client_address,
                         broadcast_callback=self.broadcast_message,
+                        ordered_room_publish_callback=self.publish_room_ordered,
                         remove_callback=self.remove_client,
                         login_callback=self.handle_user_login,
                         disconnect_callback=self.handle_user_disconnect,
@@ -166,6 +174,68 @@ class ChatServer:
             print(f"[SERVER] Error: {e}")
         finally:
             self.stop()
+
+    def _ensure_room_worker_locked(self, room_name: str):
+        """Create queue/worker for a room if it doesn't exist."""
+        if room_name in self.room_workers:
+            worker = self.room_workers[room_name]
+            if worker.is_alive():
+                return
+
+        room_queue = self.room_queues.get(room_name)
+        if room_queue is None:
+            room_queue = Queue()
+            self.room_queues[room_name] = room_queue
+
+        worker = threading.Thread(
+            target=self._room_dispatch_worker,
+            args=(room_name, room_queue),
+            daemon=True
+        )
+        self.room_workers[room_name] = worker
+        worker.start()
+
+    def _room_dispatch_worker(self, room_name: str, room_queue: Queue):
+        """Dispatch room messages in FIFO order to guarantee per-room ordering."""
+        while self.running:
+            try:
+                item = room_queue.get(timeout=0.5)
+            except Empty:
+                continue
+
+            if item is None:
+                break
+
+            message, exclude = item
+            with self.clients_lock:
+                recipients = [client for client in self.clients if client != exclude]
+
+            for client in recipients:
+                client.send_message(message)
+
+            room_queue.task_done()
+
+    def publish_room_ordered(
+        self,
+        room_name: str,
+        message: dict,
+        exclude: Optional[ClientHandler] = None
+    ) -> dict:
+        """Publish a message through the room sequencer and ordered worker queue."""
+        room = (room_name or 'global').strip() or 'global'
+
+        with self.room_lock:
+            next_seq = self.room_sequence_counter.get(room, 0) + 1
+            self.room_sequence_counter[room] = next_seq
+
+            ordered_message = dict(message)
+            ordered_message['room_name'] = room
+            ordered_message['room_seq'] = next_seq
+
+            self._ensure_room_worker_locked(room)
+            self.room_queues[room].put((ordered_message, exclude))
+
+        return ordered_message
     
     def broadcast_message(self, message: dict, exclude: Optional[ClientHandler] = None):
         """
@@ -321,6 +391,13 @@ class ChatServer:
         Stop the server and clean up resources.
         """
         self.running = False
+
+        with self.room_lock:
+            for room_queue in self.room_queues.values():
+                room_queue.put(None)
+            self.room_queues.clear()
+            self.room_workers.clear()
+            self.room_sequence_counter.clear()
 
         with self.user_lock:
             self.user_to_client.clear()

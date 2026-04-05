@@ -64,6 +64,7 @@ class ChatClient:
         self.chunk_size = 16 * 1024
         self.download_dir = os.path.join(os.getcwd(), 'downloads')
         self.transfer_cleanup_thread = None
+        self.last_seq_per_room = {}
     
     def _get_username(self) -> str:
         """Prompt user for their username."""
@@ -224,6 +225,9 @@ class ChatClient:
                     if msg_type == MessageProtocol.TYPE_FILE_ERROR:
                         self._handle_file_error(message)
                         continue
+
+                    if msg_type == MessageProtocol.TYPE_CHAT:
+                        self._check_room_sequence(message)
 
                     # Format and display the message
                     display_text = MessageProtocol.format_display_message(message)
@@ -461,6 +465,28 @@ class ChatClient:
     def _handle_file_error(self, message: dict):
         transfer_id = message.get('transfer_id', '')
         print(f"[CLIENT] File ERROR transfer={transfer_id}: {message.get('content', '')}")
+
+    def _check_room_sequence(self, message: dict):
+        """Warn if room sequence appears to have a gap on this client."""
+        room_name = (message.get('room_name') or message.get('room') or 'global').strip() or 'global'
+        room_seq = message.get('room_seq')
+        if room_seq is None:
+            return
+
+        try:
+            room_seq = int(room_seq)
+        except (TypeError, ValueError):
+            return
+
+        last_seq = self.last_seq_per_room.get(room_name)
+        if last_seq is not None and room_seq != last_seq + 1:
+            print(
+                f"[CLIENT][WARN] Sequence gap in room '{room_name}': "
+                f"expected {last_seq + 1}, got {room_seq}"
+            )
+
+        if last_seq is None or room_seq > last_seq:
+            self.last_seq_per_room[room_name] = room_seq
 
     def _send_file(self, target: str, file_path: str):
         """Send file in base64 chunks with checksum metadata."""
