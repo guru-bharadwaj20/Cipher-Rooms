@@ -138,7 +138,8 @@ class ChatServer:
                         persist_callback=self.persist_message_for_users,
                         register_user_callback=self.register_active_user,
                         unregister_user_callback=self.unregister_active_user,
-                        private_message_callback=self.route_private_message
+                        private_message_callback=self.route_private_message,
+                        file_frame_callback=self.route_file_frame
                     )
                     
                     # Add to clients list (thread-safe)
@@ -250,6 +251,51 @@ class ChatServer:
         return {
             'ok': True,
             'message_id': msg_id
+        }
+
+    def route_file_frame(self, from_username: str, message: dict) -> dict:
+        """Route file transfer frames to a direct recipient or globally."""
+        msg_type = message.get('type')
+        if msg_type not in {
+            MessageProtocol.TYPE_FILE_OFFER,
+            MessageProtocol.TYPE_FILE_CHUNK,
+            MessageProtocol.TYPE_FILE_END,
+            MessageProtocol.TYPE_FILE_ACK,
+            MessageProtocol.TYPE_FILE_ERROR
+        }:
+            return {'ok': False, 'error': 'Invalid file frame type.'}
+
+        # Keep sender identity server-authoritative.
+        message['username'] = from_username
+
+        to_username = (message.get('to_username') or '').strip()
+        room = (message.get('room') or '').strip().lower()
+
+        if to_username:
+            with self.user_lock:
+                recipient = self.user_to_client.get(to_username)
+
+            if not recipient:
+                return {
+                    'ok': False,
+                    'error': f"User '{to_username}' is offline. File frame not delivered.",
+                    'offline': True
+                }
+
+            recipient.send_message(message)
+            return {'ok': True}
+
+        # Room-wide path currently supports broadcast-to-all.
+        if room == 'all':
+            sender = None
+            with self.user_lock:
+                sender = self.user_to_client.get(from_username)
+            self.broadcast_message(message, exclude=sender)
+            return {'ok': True}
+
+        return {
+            'ok': False,
+            'error': "File target missing or unsupported. Use username or room='all'."
         }
 
     def handle_user_login(self, username: str) -> dict:

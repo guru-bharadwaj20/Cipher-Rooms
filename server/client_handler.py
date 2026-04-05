@@ -35,7 +35,8 @@ class ClientHandler:
         persist_callback: Optional[Callable] = None,
         register_user_callback: Optional[Callable] = None,
         unregister_user_callback: Optional[Callable] = None,
-        private_message_callback: Optional[Callable] = None
+        private_message_callback: Optional[Callable] = None,
+        file_frame_callback: Optional[Callable] = None
     ):
         """
         Initialize the client handler.
@@ -56,6 +57,7 @@ class ClientHandler:
         self.register_active_user = register_user_callback
         self.unregister_active_user = unregister_user_callback
         self.private_message = private_message_callback
+        self.route_file_frame = file_frame_callback
         self.username: Optional[str] = None
         self.running = True
         
@@ -186,6 +188,35 @@ class ClientHandler:
                                     MessageProtocol.TYPE_ERROR,
                                     'Server',
                                     result.get('error', 'Private message delivery failed.')
+                                )
+                            )
+
+                    elif msg_type in {
+                        MessageProtocol.TYPE_FILE_OFFER,
+                        MessageProtocol.TYPE_FILE_CHUNK,
+                        MessageProtocol.TYPE_FILE_END,
+                        MessageProtocol.TYPE_FILE_ACK,
+                        MessageProtocol.TYPE_FILE_ERROR
+                    }:
+                        if not self.route_file_frame:
+                            self.send_message(
+                                MessageProtocol.create_message(
+                                    MessageProtocol.TYPE_ERROR,
+                                    'Server',
+                                    'File transfer service unavailable.'
+                                )
+                            )
+                            continue
+
+                        result = self.route_file_frame(self.username, message)
+                        if not result.get('ok'):
+                            transfer_id = message.get('transfer_id')
+                            self.send_message(
+                                MessageProtocol.create_message(
+                                    MessageProtocol.TYPE_FILE_ERROR,
+                                    'Server',
+                                    result.get('error', 'File frame routing failed.'),
+                                    transfer_id=transfer_id
                                 )
                             )
                     

@@ -30,6 +30,11 @@ class MessageProtocol:
     TYPE_ERROR = "error"
     TYPE_SYSTEM = "system"
     TYPE_PRIVATE = "private"
+    TYPE_FILE_OFFER = "file_offer"
+    TYPE_FILE_CHUNK = "file_chunk"
+    TYPE_FILE_END = "file_end"
+    TYPE_FILE_ACK = "file_ack"
+    TYPE_FILE_ERROR = "file_error"
     
     @staticmethod
     def create_message(msg_type: str, username: str, content: str, **extra_fields) -> Dict:
@@ -113,6 +118,19 @@ class MessageProtocol:
             if to_username:
                 return f"[DM] [{username} -> {to_username}]: {content}"
             return f"[DM] [{username}]: {content}"
+        elif msg_type == MessageProtocol.TYPE_FILE_OFFER:
+            filename = message.get("filename", "unknown")
+            size = message.get("size", 0)
+            if to_username:
+                return f"[FILE] {username} -> {to_username}: {filename} ({size} bytes)"
+            return f"[FILE] {username}: {filename} ({size} bytes)"
+        elif msg_type == MessageProtocol.TYPE_FILE_ACK:
+            transfer_id = message.get("transfer_id", "")
+            stage = message.get("stage", "")
+            return f"[FILE-ACK] transfer={transfer_id} stage={stage}"
+        elif msg_type == MessageProtocol.TYPE_FILE_ERROR:
+            transfer_id = message.get("transfer_id", "")
+            return f"[FILE-ERROR] transfer={transfer_id} {content}"
         elif msg_type == MessageProtocol.TYPE_JOIN:
             return f"*** {username} joined the chat ***"
         elif msg_type == MessageProtocol.TYPE_LEAVE:
