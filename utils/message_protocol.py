@@ -29,12 +29,21 @@ class MessageProtocol:
     TYPE_LEAVE = "leave"
     TYPE_ERROR = "error"
     TYPE_SYSTEM = "system"
+    TYPE_AUTH = "auth"
+    TYPE_AUTH_OK = "auth_ok"
     TYPE_ROOM_JOIN = "room_join"
-    TYPE_ROOM_LEAVE = "room_leave"
     TYPE_ROOM_LIST = "room_list"
+    TYPE_HISTORY = "history"
+    TYPE_USER_LIST = "user_list"
+    TYPE_FILE = "file"
     
     @staticmethod
-    def create_message(msg_type: str, username: str, content: str, **extra_fields) -> Dict:
+    def create_message(
+        msg_type: str,
+        username: str,
+        content: str,
+        **extra_fields
+    ) -> Dict:
         """
         Create a message dictionary with the standard format.
         
@@ -52,8 +61,7 @@ class MessageProtocol:
             "content": content,
             "timestamp": datetime.now().isoformat()
         }
-        if extra_fields:
-            message.update(extra_fields)
+        message.update(extra_fields)
         return message
     
     @staticmethod
@@ -111,12 +119,44 @@ class MessageProtocol:
         
         if msg_type == MessageProtocol.TYPE_CHAT:
             if room:
-                return f"[{room}] [{username}]: {content}"
+                return f"[{room}] {username}: {content}"
             return f"[{username}]: {content}"
         elif msg_type == MessageProtocol.TYPE_JOIN:
+            if room:
+                return f"*** {username} joined {room} ***"
             return f"*** {username} joined the chat ***"
         elif msg_type == MessageProtocol.TYPE_LEAVE:
+            if room:
+                return f"*** {username} left {room} ***"
             return f"*** {username} left the chat ***"
+        elif msg_type == MessageProtocol.TYPE_ROOM_JOIN:
+            return f"*** {content} ***"
+        elif msg_type == MessageProtocol.TYPE_ROOM_LIST:
+            rooms = message.get("rooms", [])
+            return f"[SYSTEM]: Rooms: {', '.join(rooms) if rooms else 'No rooms available'}"
+        elif msg_type == MessageProtocol.TYPE_HISTORY:
+            history = message.get("messages", [])
+            if not history:
+                return "[SYSTEM]: No recent room history."
+            lines = ["[SYSTEM]: Recent room history:"]
+            for entry in history:
+                entry_user = entry.get("username", "Unknown")
+                entry_content = entry.get("content", "")
+                lines.append(f"  {entry_user}: {entry_content}")
+            return "\n".join(lines)
+        elif msg_type == MessageProtocol.TYPE_AUTH_OK:
+            room_name = message.get("room", "lobby")
+            return f"[SYSTEM]: Logged in as {username}. Current room: {room_name}"
+        elif msg_type == MessageProtocol.TYPE_USER_LIST:
+            users = message.get("users", [])
+            return f"[SYSTEM]: Online users: {', '.join(users) if users else 'No users online'}"
+        elif msg_type == MessageProtocol.TYPE_FILE:
+            filename = message.get("filename", "file")
+            recipient = message.get("recipient", "")
+            sender = message.get("sender", username)
+            if recipient:
+                return f"[FILE] {sender} -> {recipient}: {filename}"
+            return f"[FILE] {sender}: {filename}"
         elif msg_type == MessageProtocol.TYPE_SYSTEM:
             return f"[SYSTEM]: {content}"
         elif msg_type == MessageProtocol.TYPE_ERROR:
