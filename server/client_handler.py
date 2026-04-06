@@ -12,6 +12,8 @@ Key Networking Concepts:
 """
 
 import threading
+import queue
+import socket
 import ssl
 import uuid
 from typing import Callable, Optional
@@ -23,6 +25,8 @@ class ClientHandler:
     Handles communication with a single connected client.
     Runs in a separate thread to allow concurrent client handling.
     """
+
+    OUTGOING_QUEUE_MAXSIZE = 256
     
     def __init__(
         self,
@@ -76,13 +80,38 @@ class ClientHandler:
         self.send_lock = threading.Lock()
         self.cleanup_lock = threading.Lock()
         self.cleaned_up = False
+        self.outgoing_queue: "queue.Queue[bytes]" = queue.Queue(maxsize=self.OUTGOING_QUEUE_MAXSIZE)
         
-        # Create a thread for this client
+        # Create worker threads for this client.
+        # Reader thread handles inbound frames; sender thread drains outbound queue.
         self.thread = threading.Thread(target=self.handle_client, daemon=True)
+        self.sender_thread = threading.Thread(target=self._sender_loop, daemon=True)
     
     def start(self):
         """Start the client handler thread."""
+        self.sender_thread.start()
         self.thread.start()
+
+    def _sender_loop(self):
+        """Send queued messages to this client without blocking broadcaster threads."""
+        while self.running or not self.outgoing_queue.empty():
+            try:
+                payload = self.outgoing_queue.get(timeout=0.2)
+            except queue.Empty:
+                continue
+
+            try:
+                with self.send_lock:
+                    if not self.running:
+                        continue
+                    self.socket.sendall(payload)
+            except Exception:
+                self.running = False
+                try:
+                    self.socket.close()
+                except Exception:
+                    pass
+                break
     
     def handle_client(self):
         """
@@ -366,11 +395,24 @@ class ClientHandler:
         """
         try:
             encoded = MessageProtocol.encode_message(message)
-            with self.send_lock:
-                if not self.running:
-                    return False
-                self.socket.sendall(encoded)
+            if not self.running:
+                return False
+
+            self.outgoing_queue.put_nowait(encoded)
             return True
+        except queue.Full:
+            # Backpressure policy: disconnect slow consumer to protect room throughput.
+            print(f"[SERVER] Outgoing queue overflow for {self.username or self.address}; disconnecting client")
+            self.running = False
+            try:
+                self.socket.shutdown(socket.SHUT_RDWR)
+            except Exception:
+                pass
+            try:
+                self.socket.close()
+            except Exception:
+                pass
+            return False
         except Exception as e:
             text = str(e).lower()
             expected_disconnect = (
@@ -482,6 +524,12 @@ class ClientHandler:
         try:
             self.socket.close()
         except:
+            pass
+
+        # Let sender thread exit quickly if it's waiting.
+        try:
+            self.outgoing_queue.put_nowait(b"")
+        except Exception:
             pass
         
         # Remove this client from the server's client list

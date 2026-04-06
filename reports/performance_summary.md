@@ -1,12 +1,12 @@
 # Performance Summary
 
-Generated at: 2026-04-06T18:32:06.296985
+Generated at: 2026-04-06T18:56:15.571773
 
 | Scenario | Clients | Avg Latency (ms) | P95 Latency (ms) | Throughput (msg/s) | Error Rate | Reconnect Avg (ms) |
 |---|---:|---:|---:|---:|---:|---:|
-| room_chat | 5 | 960.22 | 2120.318 | 15.741 | 0.1 | 2050.167 |
-| dm | 5 | 686.527 | 1378.276 | 8.433 | 0.1 | 2050.167 |
-| file | 5 | 0.0 | 0.0 | 1.659 | 0.1 | 2050.167 |
+| room_chat | 5 | 703.512 | 1364.824 | 25.371 | 0.1 | 2044.288 |
+| dm | 5 | 312.944 | 624.694 | 17.75 | 0.1 | 2044.288 |
+| file | 5 | 0.0 | 0.0 | 1.664 | 0.1 | 2044.288 |
 
 ## Bottleneck Hints
 

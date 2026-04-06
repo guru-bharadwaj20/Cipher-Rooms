@@ -29,6 +29,8 @@ class ChatServer:
     """
     Secure multi-client chat server using SSL/TLS over TCP.
     """
+
+    MAX_ACTIVE_FILE_TRANSFERS = 1024
     
     def __init__(
         self,
@@ -388,6 +390,11 @@ class ChatServer:
                 return {'ok': False, 'error': f"User '{target}' is offline. File not delivered."}
 
             with self.transfer_lock:
+                if len(self.active_file_transfers) >= self.MAX_ACTIVE_FILE_TRANSFERS:
+                    return {
+                        'ok': False,
+                        'error': 'Server is busy with active file transfers. Try again shortly.'
+                    }
                 self.active_file_transfers[transfer_id] = {'from': from_username, 'to': target}
 
             recipient.send_message(message)

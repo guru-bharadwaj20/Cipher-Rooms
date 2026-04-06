@@ -8,6 +8,7 @@ log back in and continue from previous sessions.
 import json
 import os
 import threading
+from collections import deque
 from datetime import datetime
 from typing import Dict, List
 
@@ -117,7 +118,11 @@ class UserStore:
         if not os.path.exists(history_file):
             return []
 
-        messages: List[Dict] = []
+        if limit and limit > 0:
+            buffer = deque(maxlen=limit)
+        else:
+            buffer = deque()
+
         with self.lock:
             with open(history_file, 'r', encoding='utf-8') as f:
                 for line in f:
@@ -127,10 +132,8 @@ class UserStore:
                     try:
                         message = json.loads(line)
                         if isinstance(message, dict):
-                            messages.append(message)
+                            buffer.append(message)
                     except json.JSONDecodeError:
                         continue
 
-        if limit and len(messages) > limit:
-            return messages[-limit:]
-        return messages
+        return list(buffer)
