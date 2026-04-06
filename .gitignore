@@ -6,6 +6,7 @@ __pycache__/
 .Python
 env/
 venv/
+.venv/
 ENV/
 build/
 develop-eggs/
@@ -39,6 +40,13 @@ certs/server.crt
 
 # Logs
 *.log
+*.out
+*.err
+
+# Runtime artifacts
+*.pid
+.server_pid
+benchmark.exitcode
 
 # Runtime chat persistence
 data/
