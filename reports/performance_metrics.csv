@@ -1,4 +1,4 @@
 timestamp,scenario,client_count,messages_sent,messages_received,latency_avg_ms,latency_p95_ms,throughput_msgs_per_sec,error_rate,disconnect_rate,reconnect_avg_ms,reconnect_success_rate,file_bytes_sent,file_bytes_verified,notes
-2026-04-06T18:56:15.539790,room_chat,5,8,35,703.512,1364.824,25.371,0.1,0.0,2044.288,1.0,589824,0,connect_ms=10270.7
-2026-04-06T18:56:15.539859,dm,5,12,12,312.944,624.694,17.75,0.1,0.0,2044.288,1.0,589824,0,connect_ms=10270.7
-2026-04-06T18:56:15.539881,file,5,40,0,0.0,0.0,1.664,0.1,0.0,2044.288,1.0,589824,0,connect_ms=10270.7
+2026-04-06T19:05:52.616309,room_chat,5,8,0,0.0,0.0,0.0,0.083333,0.0,2043.012,1.0,589824,0,connect_ms=10253.72
+2026-04-06T19:05:52.616385,dm,5,12,0,0.0,0.0,0.0,0.083333,0.0,2043.012,1.0,589824,0,connect_ms=10253.72
+2026-04-06T19:05:52.616421,file,5,40,0,0.0,0.0,1.664,0.083333,0.0,2043.012,1.0,589824,0,connect_ms=10253.72

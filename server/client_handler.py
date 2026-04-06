@@ -92,6 +92,37 @@ class ClientHandler:
         self.sender_thread.start()
         self.thread.start()
 
+    def _reject_malformed_payload(self, error_code: str, detail: str):
+        """Send protocol error response for malformed inbound payloads."""
+        self.send_message(
+            MessageProtocol.create_message(
+                MessageProtocol.TYPE_ERROR,
+                'Server',
+                detail,
+                error_code=error_code,
+            )
+        )
+
+    def _decode_and_validate(self, data: bytes):
+        """Decode and validate one inbound frame, returning message or None if rejected."""
+        message = MessageProtocol.decode_message(data)
+        if not message:
+            self._reject_malformed_payload(
+                MessageProtocol.ERR_BAD_FORMAT,
+                "Malformed payload: expected valid JSON frame.",
+            )
+            return None
+
+        valid, error_code, detail = MessageProtocol.validate_message(message)
+        if not valid:
+            self._reject_malformed_payload(
+                error_code or MessageProtocol.ERR_BAD_FORMAT,
+                detail or "Malformed protocol payload.",
+            )
+            return None
+
+        return message
+
     def _sender_loop(self):
         """Send queued messages to this client without blocking broadcaster threads."""
         while self.running or not self.outgoing_queue.empty():
@@ -134,10 +165,12 @@ class ClientHandler:
             if not data:
                 return
             
-            message = MessageProtocol.decode_message(data)
+            message = self._decode_and_validate(data)
             if message and message.get("type") == MessageProtocol.TYPE_JOIN:
                 self.username = message.get("username", "Unknown")
                 print(f"[SERVER] {self.username} connected from {self.address}")
+            else:
+                return
 
                 if self.register_active_user:
                     self.register_active_user(self.username, self)
@@ -181,7 +214,7 @@ class ClientHandler:
                     break
                 
                 # Decode and process the message
-                message = MessageProtocol.decode_message(data)
+                message = self._decode_and_validate(data)
                 if message:
                     msg_type = message.get("type")
                     

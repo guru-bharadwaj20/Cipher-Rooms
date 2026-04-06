@@ -118,6 +118,126 @@ Pulse-Chat/
 
 ---
 
+## 📐 Protocol Specification
+
+### Protocol Version
+
+- Current version: `1.1`
+- Every frame is newline-delimited JSON (`\n` terminated)
+- Every frame must include `protocol_version`
+
+### Base Message Schema (All Types)
+
+All messages share these required fields:
+
+```json
+{
+    "type": "<message_type>",
+    "username": "<sender_username>",
+    "content": "<human_readable_content>",
+    "timestamp": "<iso-8601>",
+    "protocol_version": "1.1"
+}
+```
+
+### Message Types And Required Extra Fields
+
+- `chat`: no extra required fields
+- `join`: no extra required fields
+- `leave`: no extra required fields
+- `system`: no extra required fields
+- `error`: optional `error_code`
+- `ack`: required `ack_for`
+- `private`: required `to_username`, `message_id`
+- `room_join`: required `room_name`
+- `room_leave`: no extra required fields (server may include `room_name`)
+- `room_list`: required `rooms` (array)
+- `file_offer`: required `to_username`, `transfer_id`, `filename`, `size`, `checksum`, `total_chunks`
+- `file_chunk`: required `to_username`, `transfer_id`, `chunk_index`, `total_chunks`, `chunk_data`
+- `file_end`: required `to_username`, `transfer_id`
+- `file_ack`: required `to_username`, `transfer_id`
+- `file_error`: required `transfer_id`
+
+### Example Frames
+
+Private message:
+
+```json
+{
+    "type": "private",
+    "username": "alice",
+    "to_username": "bob",
+    "message_id": "9f3a7e7a-c2f7-4fb0-8d12-3ea2f7f55ac1",
+    "content": "hello bob",
+    "timestamp": "2026-04-06T18:45:00.123456",
+    "protocol_version": "1.1"
+}
+```
+
+Room join:
+
+```json
+{
+    "type": "room_join",
+    "username": "alice",
+    "room_name": "networks",
+    "content": "join networks",
+    "timestamp": "2026-04-06T18:45:04.000000",
+    "protocol_version": "1.1"
+}
+```
+
+File offer:
+
+```json
+{
+    "type": "file_offer",
+    "username": "alice",
+    "to_username": "bob",
+    "transfer_id": "d71eaec0-4c7a-4bd8-8a60-c90a4f63f4d9",
+    "filename": "report.pdf",
+    "size": 245760,
+    "checksum": "<sha256_hex>",
+    "total_chunks": 16,
+    "content": "file offer",
+    "timestamp": "2026-04-06T18:45:09.700000",
+    "protocol_version": "1.1"
+}
+```
+
+Validation error response:
+
+```json
+{
+    "type": "error",
+    "username": "Server",
+    "content": "Missing required field(s): transfer_id",
+    "error_code": "ERR_MISSING_FIELD",
+    "timestamp": "2026-04-06T18:45:10.400000",
+    "protocol_version": "1.1"
+}
+```
+
+### Error Codes
+
+- `ERR_BAD_FORMAT`: payload is not valid JSON object or frame shape is invalid
+- `ERR_UNKNOWN_TYPE`: unknown `type`
+- `ERR_MISSING_FIELD`: one or more required fields are absent
+- `ERR_INVALID_FIELD`: field exists but type/value is invalid
+
+### Ordering Rules
+
+- Transport is TCP+TLS, so per-connection byte order is preserved.
+- For room chat, clients should use server receive order as canonical display order.
+- For file transfer, process by `transfer_id` and `chunk_index`.
+- `file_end` completes transfer assembly; `file_ack` indicates receiver verification success.
+- Client implementations should ignore unknown extra fields for forward compatibility.
+
+### Validation Behavior
+
+- Server validates all inbound payloads in `server/client_handler.py` before command handling.
+- Malformed frames are rejected early with an `error` frame and do not enter room/DM/file logic.
+
 ## 🔐 SSL/TLS Setup
 
 ### What is SSL/TLS?
