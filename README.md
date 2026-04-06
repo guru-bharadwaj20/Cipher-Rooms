@@ -15,6 +15,7 @@ A secure, multi-client chat server implementation using Python with SSL/TLS encr
 - **Real-Time Messaging:** Broadcast messages to all connected clients
 - **Persistent User Profiles:** Returning users are recognized with login metadata
 - **Chat History Replay:** User-specific previous chats are loaded on login
+- **Performance Benchmarking:** Synthetic load tests for room chat, DM, and file transfer
 - **Graceful Error Handling:** Proper handling of disconnections and errors
 - **Modular Architecture:** Clean separation of concerns with well-documented code
 - **Educational Comments:** Detailed explanations of networking concepts
@@ -42,6 +43,11 @@ Pulse-Chat/
 ├── utils/                          # Shared utilities
 │   ├── __init__.py
 │   └── message_protocol.py         # Message encoding/decoding (JSON)
+│
+├── benchmarks/
+│   └── load_test.py                # Load test harness + metrics writer
+│
+├── reports/                        # Generated benchmark artifacts (CSV/MD)
 │
 ├── run_server.py                   # Server entry point
 ├── run_client.py                   # Client entry point
@@ -226,6 +232,30 @@ python run_client.py localhost 5555         # Connect to localhost:5555
 python run_client.py localhost 5555 Alice   # With username
 python run_client.py 192.168.1.100 8080     # Remote server
 ```
+
+### Step 4: Run Performance Benchmarks
+
+In a new terminal (with server running):
+
+```bash
+python benchmarks/load_test.py --host localhost --port 5555 --clients 5,20,50,100
+```
+
+Outputs:
+- `reports/performance_metrics.csv`
+- `reports/performance_summary.md`
+
+Measured metrics:
+- latency (avg, p95)
+- throughput (messages/sec)
+- error rate
+- disconnect rate
+- reconnect time
+
+Scenarios covered:
+- room chat
+- private messaging
+- file transfer
 
 ---
 

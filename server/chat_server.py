@@ -71,6 +71,7 @@ class ChatServer:
         # Server state
         self.running = False
         self.server_socket: Optional[socket.socket] = None
+        self.secure_socket: Optional[socket.socket] = None
     
     def start(self):
         """
@@ -113,6 +114,7 @@ class ChatServer:
                 self.server_socket,
                 server_side=True
             )
+            self.secure_socket = secure_socket
             
             # Step 5: Listen for incoming connections
             # Backlog of 5 means up to 5 pending connections can wait
@@ -162,11 +164,24 @@ class ChatServer:
                     client_handler.start()
                 
                 except ssl.SSLError as e:
+                    # Common during abrupt client disconnects under load tests.
+                    text = str(e).lower()
+                    if "unexpected eof" in text or "eof occurred in violation of protocol" in text:
+                        continue
                     print(f"[SERVER] SSL Error: {e}")
-                except OSError:
+                except OSError as e:
                     # Socket closed, server stopping
-                    if self.running:
-                        raise
+                    if not self.running:
+                        break
+
+                    # Windows can emit recoverable connection abort/reset during accept.
+                    # Keep server alive for these transient client-side failures.
+                    winerror = getattr(e, 'winerror', None)
+                    if winerror in {10053, 10054}:
+                        print(f"[SERVER] Connection aborted/reset during accept: {e}")
+                        continue
+
+                    raise
                     break
         
         except KeyboardInterrupt:
@@ -189,13 +204,22 @@ class ChatServer:
             message: Message dictionary to broadcast
             exclude: Optional client to exclude from broadcast (e.g., the sender)
         """
+        failed_clients = []
+
         # Use lock to safely iterate over clients list
         # Multiple threads might be adding/removing clients simultaneously
         with self.clients_lock:
-            for client in self.clients:
+            clients_snapshot = list(self.clients)
+
+        for client in clients_snapshot:
                 # Skip the excluded client if specified
-                if client != exclude:
-                    client.send_message(message)
+            if client != exclude:
+                delivered = client.send_message(message)
+                if delivered is False:
+                    failed_clients.append(client)
+
+        for failed in failed_clients:
+            self.remove_client(failed)
 
     def broadcast_to_room(self, room_name: str, message: dict, exclude: Optional[ClientHandler] = None):
         """Broadcast to users in a room only."""
@@ -208,8 +232,14 @@ class ChatServer:
                 if handler and handler != exclude:
                     recipients.append(handler)
 
+        failed_clients = []
         for recipient in recipients:
-            recipient.send_message(message)
+            delivered = recipient.send_message(message)
+            if delivered is False:
+                failed_clients.append(recipient)
+
+        for failed in failed_clients:
+            self.remove_client(failed)
     
     def remove_client(self, client: ClientHandler):
         """
@@ -448,11 +478,19 @@ class ChatServer:
             self.clients.clear()
         
         # Close the server socket
+        if self.secure_socket:
+            try:
+                self.secure_socket.close()
+            except:
+                pass
+            self.secure_socket = None
+
         if self.server_socket:
             try:
                 self.server_socket.close()
             except:
                 pass
+            self.server_socket = None
         
         print("[SERVER] Server stopped")
 

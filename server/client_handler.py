@@ -73,6 +73,9 @@ class ClientHandler:
         self.current_room = default_room
         self.active_transfer_ids = set()
         self.running = True
+        self.send_lock = threading.Lock()
+        self.cleanup_lock = threading.Lock()
+        self.cleaned_up = False
         
         # Create a thread for this client
         self.thread = threading.Thread(target=self.handle_client, daemon=True)
@@ -363,10 +366,29 @@ class ClientHandler:
         """
         try:
             encoded = MessageProtocol.encode_message(message)
-            self.socket.sendall(encoded)
+            with self.send_lock:
+                if not self.running:
+                    return False
+                self.socket.sendall(encoded)
+            return True
         except Exception as e:
-            print(f"[SERVER] Error sending to {self.username}: {e}")
+            text = str(e).lower()
+            expected_disconnect = (
+                "eof occurred in violation of protocol" in text
+                or "unexpected eof" in text
+                or "forcibly closed by the remote host" in text
+                or "connection was aborted" in text
+                or "winerror 10053" in text
+                or "winerror 10054" in text
+            )
+            if not expected_disconnect:
+                print(f"[SERVER] Error sending to {self.username}: {e}")
             self.running = False
+            try:
+                self.socket.close()
+            except Exception:
+                pass
+            return False
 
     def _send_login_context(self, login_info: dict):
         """Send profile and history context to the logging-in client."""
@@ -415,6 +437,11 @@ class ClientHandler:
         Clean up resources when client disconnects.
         This ensures proper resource management and notifies other clients.
         """
+        with self.cleanup_lock:
+            if self.cleaned_up:
+                return
+            self.cleaned_up = True
+
         self.running = False
         
         # Announce departure to other clients
