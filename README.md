@@ -13,8 +13,10 @@ A secure, multi-client chat server implementation using Python with SSL/TLS encr
 - **Secure Communication:** SSL/TLS encryption using self-signed certificates
 - **Multi-Client Support:** Concurrent client handling using threads
 - **Real-Time Messaging:** Broadcast messages to all connected clients
-- **Persistent User Profiles:** Returning users are recognized with login metadata
-- **Chat History Replay:** User-specific previous chats are loaded on login
+- **Room-Based Chat:** Join or create named rooms like `/join games`
+- **Persistent Accounts:** Username/password login backed by SQLite
+- **Saved Chat History:** Recent room messages are loaded after login or room switch
+- **Reconnect-Friendly Client:** Client keeps retrying if the server goes down
 - **Graceful Error Handling:** Proper handling of disconnections and errors
 - **Modular Architecture:** Clean separation of concerns with well-documented code
 - **Educational Comments:** Detailed explanations of networking concepts
@@ -38,6 +40,9 @@ Pulse-Chat/
 ├── client/                         # Client implementation
 │   ├── __init__.py
 │   └── chat_client.py              # Client connection and messaging
+│
+├── data/                           # SQLite database (generated at runtime)
+│   └── pulse_chat.db
 │
 ├── utils/                          # Shared utilities
 │   ├── __init__.py
@@ -90,23 +95,25 @@ Pulse-Chat/
 - Handles receiving messages from one client
 - Sends messages to one client
 - Manages client lifecycle (join/leave)
-- Sends login context (welcome + history replay)
 - Thread-safe communication with server
 
-**3. User Store (`server/user_store.py`)**
-- Persists user profiles in `data/profiles.json`
-- Persists per-user chat history in `data/history/*.jsonl`
-- Updates `last_seen` when users disconnect
-
-**4. Client (`client/chat_client.py`)**
+**3. Client (`client/chat_client.py`)**
 - Connects to server via TLS
+- Authenticates with username/password
 - Runs receive loop in separate thread
 - Handles user input in main thread
+- Retries automatically after disconnects
 - Displays incoming messages
+
+**4. Database (`server/chat_database.py`)**
+- Stores users, rooms, and chat history in SQLite
+- Creates accounts on first login
+- Validates returning users by password
+- Loads recent room history on login and room changes
 
 **5. Message Protocol (`utils/message_protocol.py`)**
 - JSON-based message format
-- Message types: chat, join, leave, system, error
+- Message types: auth, chat, room joins, history, system, error
 - Encoding/decoding utilities
 - Message formatting for display
 
@@ -235,8 +242,14 @@ python run_client.py 192.168.1.100 8080     # Remote server
 
 Once connected:
 - **Type any message** and press Enter to send
+- **Type `/rooms`** to see available rooms
+- **Type `/join room-name`** to switch rooms or create one
+- **Type `/room`** to show your current room
+- **Type `/help`** to view commands
 - **Type `/quit`** to disconnect
 - **Press Ctrl+C** or **Ctrl+D** to exit
+
+On first login, entering a new username creates an account automatically. Logging in again with the same username restores access to the saved rooms and chat history for those rooms.
 
 ### Example Session
 

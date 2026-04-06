@@ -39,6 +39,6 @@ certs/server.crt
 
 # Logs
 *.log
-
-# Runtime chat persistence
+__pycache__/
+*.pyc
 data/
