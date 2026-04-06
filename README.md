@@ -261,6 +261,22 @@ Validation error response:
    - Connects to server (TLS handshake)
    - For self-signed certs, certificate verification is disabled
 
+### TLS Trust Model Limitation (Class Demo)
+
+- Current client configuration uses `verify_mode=CERT_NONE` and `check_hostname=False` for local/demo use.
+- This means transport is encrypted, but server identity is not strongly authenticated.
+- For production, replace with CA-based certificate validation and hostname verification.
+
+### File Sharing Security Controls
+
+- Filename sanitization on receive: strips path traversal and unsafe characters.
+- Path traversal blocked: file saves are restricted to client `downloads/` directory.
+- Maximum file size enforced on send and receive (10 MB).
+- Allowed extension/MIME policy enforced before transfer acceptance.
+- Chunk-size checks enforced on client and server.
+- SHA-256 checksum verified at receiver; checksum mismatch triggers `file_error` and file discard.
+- Server enforces file-chunk rate limits to reduce abuse and protect shared performance.
+
 ### Self-Signed Certificates
 
 For this educational project, we use **self-signed certificates**:

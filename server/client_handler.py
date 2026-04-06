@@ -16,6 +16,7 @@ import queue
 import socket
 import ssl
 import uuid
+import time
 from typing import Callable, Optional
 from utils.message_protocol import MessageProtocol
 
@@ -27,6 +28,9 @@ class ClientHandler:
     """
 
     OUTGOING_QUEUE_MAXSIZE = 256
+    MAX_FILE_CHUNK_RAW_BYTES = 32 * 1024
+    MAX_FILE_CHUNK_B64_BYTES = ((MAX_FILE_CHUNK_RAW_BYTES + 2) // 3) * 4
+    FILE_CHUNK_RATE_LIMIT_PER_SEC = 64
     
     def __init__(
         self,
@@ -81,6 +85,8 @@ class ClientHandler:
         self.cleanup_lock = threading.Lock()
         self.cleaned_up = False
         self.outgoing_queue: "queue.Queue[bytes]" = queue.Queue(maxsize=self.OUTGOING_QUEUE_MAXSIZE)
+        self._rate_window_start = time.time()
+        self._rate_window_count = 0
         
         # Create worker threads for this client.
         # Reader thread handles inbound frames; sender thread drains outbound queue.
@@ -143,6 +149,36 @@ class ClientHandler:
                 except Exception:
                     pass
                 break
+
+    def _within_chunk_rate_limit(self) -> bool:
+        now = time.time()
+        if now - self._rate_window_start >= 1.0:
+            self._rate_window_start = now
+            self._rate_window_count = 0
+        self._rate_window_count += 1
+        return self._rate_window_count <= self.FILE_CHUNK_RATE_LIMIT_PER_SEC
+
+    def _validate_file_message_limits(self, message: dict):
+        """Apply server-side chunk size and transfer rate guardrails."""
+        msg_type = message.get("type")
+        if msg_type != MessageProtocol.TYPE_FILE_CHUNK:
+            return True, None
+
+        if not self._within_chunk_rate_limit():
+            return False, "File chunk rate limit exceeded. Slow down transfer."
+
+        encoded_chunk = message.get("chunk_data", "")
+        if not isinstance(encoded_chunk, str):
+            return False, "Invalid chunk_data format."
+        try:
+            encoded_chunk_bytes = encoded_chunk.encode("ascii")
+        except UnicodeEncodeError:
+            return False, "Invalid chunk_data encoding; expected base64 ASCII."
+
+        if len(encoded_chunk_bytes) > self.MAX_FILE_CHUNK_B64_BYTES:
+            return False, f"Chunk exceeds max encoded size ({self.MAX_FILE_CHUNK_B64_BYTES} bytes)."
+
+        return True, None
     
     def handle_client(self):
         """
@@ -169,9 +205,6 @@ class ClientHandler:
             if message and message.get("type") == MessageProtocol.TYPE_JOIN:
                 self.username = message.get("username", "Unknown")
                 print(f"[SERVER] {self.username} connected from {self.address}")
-            else:
-                return
-
                 if self.register_active_user:
                     self.register_active_user(self.username, self)
 
@@ -203,6 +236,8 @@ class ClientHandler:
                     self.broadcast(join_msg, exclude=self)
                 if self.persist_message:
                     self.persist_message(join_msg)
+            else:
+                return
             
             # Main message receiving loop
             while self.running:
@@ -216,6 +251,18 @@ class ClientHandler:
                 # Decode and process the message
                 message = self._decode_and_validate(data)
                 if message:
+                    limit_ok, limit_error = self._validate_file_message_limits(message)
+                    if not limit_ok:
+                        self.send_message(
+                            MessageProtocol.create_message(
+                                MessageProtocol.TYPE_FILE_ERROR,
+                                'Server',
+                                limit_error or 'File transfer limits exceeded.',
+                                transfer_id=message.get('transfer_id', '')
+                            )
+                        )
+                        continue
+
                     msg_type = message.get("type")
                     
                     if msg_type == MessageProtocol.TYPE_CHAT:

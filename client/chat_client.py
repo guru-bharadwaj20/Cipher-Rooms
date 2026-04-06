@@ -23,6 +23,8 @@ import os
 import uuid
 import base64
 import hashlib
+import re
+import mimetypes
 from utils.message_protocol import MessageProtocol
 
 
@@ -30,6 +32,14 @@ class ChatClient:
     """
     Secure chat client that connects to the chat server via TLS.
     """
+
+    MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB
+    MAX_CHUNK_SIZE_BYTES = 32 * 1024        # 32 KB
+    ALLOWED_EXTENSIONS = {
+        '.txt', '.md', '.csv', '.json', '.log',
+        '.png', '.jpg', '.jpeg', '.gif', '.webp',
+        '.pdf'
+    }
     
     def __init__(
         self,
@@ -62,6 +72,24 @@ class ChatClient:
         self.incoming_file_transfers = {}
         self.last_dm_target = None
         self.last_file_send_command = None
+
+    def _sanitize_filename(self, raw_name: str) -> str:
+        """Sanitize incoming filename to prevent traversal and unsafe paths."""
+        candidate = os.path.basename((raw_name or '').strip())
+        candidate = candidate.replace('..', '')
+        candidate = re.sub(r'[^A-Za-z0-9._-]', '_', candidate)
+        if not candidate or candidate in {'.', '..'}:
+            return ''
+        return candidate[:128]
+
+    def _is_allowed_file_type(self, filename: str) -> bool:
+        ext = os.path.splitext(filename)[1].lower()
+        if ext not in self.ALLOWED_EXTENSIONS:
+            return False
+        guessed, _ = mimetypes.guess_type(filename)
+        if guessed and not guessed.startswith(('text/', 'image/', 'application/pdf', 'application/json')):
+            return False
+        return True
     
     def _get_username(self) -> str:
         """Prompt user for their username."""
@@ -406,7 +434,45 @@ class ChatClient:
         if not transfer_id:
             return
 
-        filename = os.path.basename(message.get('filename', 'download.bin'))
+        raw_filename = message.get('filename', 'download.bin')
+        filename = self._sanitize_filename(raw_filename)
+        if not filename:
+            self._send_message(
+                MessageProtocol.create_message(
+                    MessageProtocol.TYPE_FILE_ERROR,
+                    self.username,
+                    'Rejected unsafe filename.',
+                    transfer_id=transfer_id,
+                    to_username=message.get('username', '')
+                )
+            )
+            return
+
+        if not self._is_allowed_file_type(filename):
+            self._send_message(
+                MessageProtocol.create_message(
+                    MessageProtocol.TYPE_FILE_ERROR,
+                    self.username,
+                    f"Rejected disallowed file type: {os.path.splitext(filename)[1] or 'unknown'}",
+                    transfer_id=transfer_id,
+                    to_username=message.get('username', '')
+                )
+            )
+            return
+
+        offered_size = int(message.get('size', 0) or 0)
+        if offered_size <= 0 or offered_size > self.MAX_FILE_SIZE_BYTES:
+            self._send_message(
+                MessageProtocol.create_message(
+                    MessageProtocol.TYPE_FILE_ERROR,
+                    self.username,
+                    f"Rejected file size {offered_size} bytes (max {self.MAX_FILE_SIZE_BYTES}).",
+                    transfer_id=transfer_id,
+                    to_username=message.get('username', '')
+                )
+            )
+            return
+
         os.makedirs(self.download_dir, exist_ok=True)
         final_path = os.path.join(self.download_dir, filename)
         temp_path = final_path + '.part'
@@ -415,7 +481,7 @@ class ChatClient:
             'final_path': final_path,
             'temp_path': temp_path,
             'checksum': message.get('checksum', ''),
-            'size': int(message.get('size', 0)),
+            'size': offered_size,
             'from': message.get('username', '')
         }
 
@@ -438,14 +504,23 @@ class ChatClient:
         chunk_data = message.get('chunk_data', '')
         try:
             raw = base64.b64decode(chunk_data.encode('ascii'))
+            if len(raw) > self.MAX_CHUNK_SIZE_BYTES:
+                raise ValueError('chunk too large')
+
+            existing_size = 0
+            if os.path.exists(state['temp_path']):
+                existing_size = os.path.getsize(state['temp_path'])
+            if existing_size + len(raw) > self.MAX_FILE_SIZE_BYTES:
+                raise ValueError('transfer exceeds max file size')
+
             with open(state['temp_path'], 'ab') as f:
                 f.write(raw)
-        except Exception:
+        except Exception as e:
             self._send_message(
                 MessageProtocol.create_message(
                     MessageProtocol.TYPE_FILE_ERROR,
                     self.username,
-                    'Failed to decode/write file chunk.',
+                    f'Failed to decode/write file chunk: {e}',
                     transfer_id=transfer_id,
                     to_username=state.get('from')
                 )
@@ -517,9 +592,25 @@ class ChatClient:
             print(f"[CLIENT] File not found: {file_path}")
             return
 
+        filename = self._sanitize_filename(os.path.basename(file_path))
+        if not filename:
+            print("[CLIENT] Rejected unsafe filename.")
+            return
+
+        if not self._is_allowed_file_type(filename):
+            print(f"[CLIENT] Disallowed file type: {os.path.splitext(filename)[1] or 'unknown'}")
+            return
+
         transfer_id = str(uuid.uuid4())
-        filename = os.path.basename(file_path)
         file_size = os.path.getsize(file_path)
+        if file_size <= 0:
+            print("[CLIENT] Empty files are not allowed.")
+            return
+        if file_size > self.MAX_FILE_SIZE_BYTES:
+            print(f"[CLIENT] File too large ({file_size} bytes). Max allowed: {self.MAX_FILE_SIZE_BYTES} bytes")
+            return
+
+        total_chunks = (file_size + self.file_chunk_size - 1) // self.file_chunk_size
 
         hasher = hashlib.sha256()
         with open(file_path, 'rb') as f:
@@ -538,6 +629,7 @@ class ChatClient:
             filename=filename,
             size=file_size,
             checksum=checksum,
+            total_chunks=total_chunks,
             to_username=target_user
         )
         self._send_message(offer)
@@ -555,6 +647,7 @@ class ChatClient:
                     f"chunk:{chunk_index}",
                     transfer_id=transfer_id,
                     chunk_index=chunk_index,
+                    total_chunks=total_chunks,
                     chunk_data=encoded,
                     to_username=target_user
                 )
